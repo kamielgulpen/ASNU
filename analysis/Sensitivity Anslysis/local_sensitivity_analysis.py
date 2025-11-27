@@ -94,17 +94,42 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
             else:
                 degree_skewness = 0
 
+            # Degree assortativity
+            try:
+                degree_assortativity = nx.degree_assortativity_coefficient(G.graph)
+            except:
+                degree_assortativity = 0
+
+            # Modularity (using community detection)
+            try:
+                # Use the communities from the network generation if available
+                if hasattr(G, 'communities') and G.communities:
+                    # Convert to list of sets format expected by networkx
+                    communities_list = [set(comm) for comm in G.communities.values()]
+                    modularity = nx.algorithms.community.modularity(G.graph, communities_list)
+                else:
+                    # Use Louvain community detection as fallback
+                    import networkx.algorithms.community as nx_comm
+                    communities = nx_comm.greedy_modularity_communities(G.graph)
+                    modularity = nx_comm.modularity(G.graph, communities)
+            except:
+                modularity = 0
+
         else:
             reciprocity_actual = 0
             transitivity_actual = 0
             avg_path_length = 0
             degree_skewness = 0
+            degree_assortativity = 0
+            modularity = 0
 
         metrics = {
             'reciprocity': reciprocity_actual,
             'transitivity': transitivity_actual,
             'avg_path_length': avg_path_length,
-            'degree_skewness': degree_skewness
+            'degree_skewness': degree_skewness,
+            'degree_assortativity': degree_assortativity,
+            'modularity': modularity
         }
 
         # Clean up temporary network
@@ -124,7 +149,9 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
             'reciprocity': 0,
             'transitivity': 0,
             'avg_path_length': 0,
-            'degree_skewness': 0
+            'degree_skewness': 0,
+            'degree_assortativity': 0,
+            'modularity': 0
         }
 
 
@@ -194,7 +221,7 @@ def ofat_analysis(pops_path, links_path, scale=0.05,
         }
 
     # Define output metrics
-    metric_names = ['reciprocity', 'transitivity', 'avg_path_length', 'degree_skewness']
+    metric_names = ['reciprocity', 'transitivity', 'avg_path_length', 'degree_skewness', 'degree_assortativity', 'modularity']
 
     # Load checkpoint if resuming
     if resume_run_id:
