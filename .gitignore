@@ -89,6 +89,7 @@ mlruns/
 graph_data/
 subgraph_data/
 user-data/
+temp_network_sa/
 
 # python files
 start_mlflow.py

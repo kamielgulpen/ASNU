@@ -16,6 +16,8 @@ import pickle
 import os
 from pathlib import Path
 import shutil
+from matplotlib import rcParams
+import seaborn as sns
 
 
 def run_model_sample(params, pops_path, links_path, scale=0.05):
@@ -50,11 +52,6 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
         num_edges = G.graph.number_of_edges()
 
         if num_nodes > 0 and num_edges > 0:
-            # Average degree
-            avg_degree = 2 * num_edges / num_nodes
-
-            # Density
-            density = nx.density(G.graph)
 
             # Reciprocity
             reciprocity_actual = nx.reciprocity(G.graph)
@@ -99,18 +96,14 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
                 degree_skewness = 0
 
         else:
-            avg_degree = 0
-            density = 0
             reciprocity_actual = 0
             transitivity_actual = 0
             avg_path_length = 0
             degree_skewness = 0
 
         metrics = {
-            'avg_degree': avg_degree,
             'reciprocity': reciprocity_actual,
             'transitivity': transitivity_actual,
-            'density': density,
             'avg_path_length': avg_path_length,
             'degree_skewness': degree_skewness
         }
@@ -129,10 +122,8 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
         if os.path.exists(temp_path):
             shutil.rmtree(temp_path)
         return {
-            'avg_degree': 0,
             'reciprocity': 0,
             'transitivity': 0,
-            'density': 0,
             'avg_path_length': 0,
             'degree_skewness': 0
         }
@@ -179,7 +170,7 @@ def pawn_analysis(pops_path, links_path, scale=0.05, save_interval=50, samples =
     }
 
     # Define output metrics
-    metric_names = ['avg_degree', 'reciprocity', 'transitivity', 'density', 'avg_path_length', 'degree_skewness']
+    metric_names = ['reciprocity', 'transitivity', 'avg_path_length', 'degree_skewness']
 
     # Generate samples using Latin Hypercube
     param_values = latin.sample(problem, samples)
@@ -272,29 +263,72 @@ def pawn_analysis(pops_path, links_path, scale=0.05, save_interval=50, samples =
         # Create comprehensive visualization
         n_metrics = len(results)
         if n_metrics > 0:
-            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-            axes = axes.flatten()
 
+            # Set publication-quality defaults
+            rcParams['font.family'] = 'serif'
+            rcParams['font.serif'] = ['Times New Roman', 'DejaVu Serif']
+            rcParams['font.size'] = 11
+            rcParams['axes.labelsize'] = 12
+            rcParams['axes.titlesize'] = 14
+            rcParams['xtick.labelsize'] = 10
+            rcParams['ytick.labelsize'] = 10
+            rcParams['legend.fontsize'] = 10
+            rcParams['figure.dpi'] = 300
+            
+            # Create single figure
+            fig, ax = plt.subplots(figsize=(12, 6))
+            
+            # Prepare data
+            metric_names = list(results.keys())
+            param_names = problem['names']
+            n_params = len(param_names)
+            n_metrics = len(metric_names)
+            
+            # Set up grouped bar chart
+            bar_width = 0.8 / n_metrics
+            x_pos = np.arange(n_params)
+            
+            # Professional color palette
+            colors = sns.color_palette("Set2", n_colors=n_metrics)
+            
+            # Plot bars for each metric
             for idx, (metric_name, Si) in enumerate(results.items()):
-                if idx >= 6:
-                    break
-
-                ax = axes[idx]
-                x_pos = np.arange(len(problem['names']))
-
-                # Plot median KS statistic
-                ax.bar(x_pos, Si['median'], alpha=0.7)
-                ax.set_xticks(x_pos)
-                ax.set_xticklabels(problem['names'], rotation=45, ha='right')
-                ax.set_ylabel('PAWN Index (Median KS)')
-                ax.set_title(f'{metric_name.replace("_", " ").title()}')
-                ax.set_ylim([0, 1])
-                ax.grid(axis='y', alpha=0.3)
+                offset = (idx - n_metrics/2 + 0.5) * bar_width
+                bars = ax.bar(x_pos + offset, Si['median'], bar_width, 
+                            label=metric_name.replace("_", " ").title(),
+                            alpha=0.85, color=colors[idx], 
+                            edgecolor='black', linewidth=0.5)
+            
+            # Styling
+            ax.set_xlabel('Parameters', fontweight='bold')
+            ax.set_ylabel('PAWN Index (Median KS)', fontweight='bold')
+            ax.set_title('Sensitivity Analysis: PAWN Indices Across Metrics', 
+                        fontweight='bold', pad=15)
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(param_names, rotation=45, ha='right')
+            ax.set_ylim([0, 1.05])
+            
+            # Grid and spines
+            ax.grid(axis='y', alpha=0.25, linestyle='--', linewidth=0.5)
+            ax.set_axisbelow(True)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.spines['left'].set_linewidth(0.8)
+            ax.spines['bottom'].set_linewidth(0.8)
+            
+            # Legend
+            ax.legend(loc='upper right', frameon=True, fancybox=False, 
+                    shadow=False, framealpha=0.95, edgecolor='black')
+            
+            # Save in multiple formats
+            plt.savefig('user-data/outputs/pawn_sensitivity_analysis.png', dpi=300, bbox_inches='tight')
+            plt.savefig('user-data/outputs/pawn_sensitivity_analysis.pdf', bbox_inches='tight')
+            
 
             plt.tight_layout()
             os.makedirs('user-data/outputs', exist_ok=True)
-            plt.savefig('user-data/outputs/sensitivity_results.png', dpi=150)
-            mlflow.log_artifact('user-data/outputs/sensitivity_results.png')
+            mlflow.log_artifact('user-data/outputs/pawn_sensitivity_analysis.png')
+            mlflow.log_artifact('user-data/outputs/pawn_sensitivity_analysis.pdf')
 
         print(f"\nResults logged to MLflow")
         print(f"Run ID: {run.info.run_id}")
@@ -311,7 +345,7 @@ if __name__ == '__main__':
     
 
     # Start fresh
-    pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples = 100)
+    pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples = 500)
 
     # To resume from a previous run:
     # pawn_analysis(pops_path, links_path, scale=0.1, save_interval=10, samples =50, resume_run_id="6ae3d9cbba9e4dde910f9c47583ce280")
@@ -319,7 +353,6 @@ if __name__ == '__main__':
     # Launch MLflow UI
     import subprocess
     import sys
-
 
     subprocess.Popen([
         sys.executable, '-m', 'mlflow', 'ui',
