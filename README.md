@@ -31,7 +31,7 @@ from asnu import generate
 # Generate a network
 G = generate(
     pops_path="population.csv",           # Population data
-    links_path="interactions.xlsx",       # Interaction data
+    links_path="interactions.csv",       # Interaction data
     preferential_attachment=0.5,          # Strength of preferential attachment
     scale=0.1,                            # Network size scaling
     reciprocity=0.2,                      # Probability of reciprocal edges
