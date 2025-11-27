@@ -174,7 +174,7 @@ def pawn_analysis(pops_path, links_path, scale=0.05, save_interval=50, samples =
             [0.0, 0.99],      # preferential_attachment
             [0.0, 1],      # reciprocity
             [0.0, 1],      # transitivity
-            [5, 300]          # number_of_communities
+            [1, 100]          # number_of_communities
         ]
     }
 
@@ -311,7 +311,7 @@ if __name__ == '__main__':
     
 
     # Start fresh
-    pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples = 3)
+    pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples = 100)
 
     # To resume from a previous run:
     # pawn_analysis(pops_path, links_path, scale=0.1, save_interval=10, samples =50, resume_run_id="6ae3d9cbba9e4dde910f9c47583ce280")
