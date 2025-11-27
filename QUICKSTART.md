@@ -100,6 +100,6 @@ print(f"Top 5 nodes by degree: {top_nodes}")
 
 ## Getting Help
 
-- GitHub Issues: https://github.com/yourusername/asnu/issues
+- GitHub Issues: https://github.com/kamielgulpen/asnu/issues
 - Documentation: See README.md
 - Examples: Check the `examples/` directory

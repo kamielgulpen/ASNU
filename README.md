@@ -18,7 +18,7 @@ pip install asnu
 ### From source
 
 ```bash
-git clone https://github.com/yourusername/asnu.git
+git clone https://github.com/kamielgulpen/asnu.git
 cd asnu
 pip install -e .
 ```
@@ -160,7 +160,7 @@ If you use ASNU in your research, please cite:
   title={ASNU: Aggregated Social Network Unfolder},
   author={Your Name},
   year={2024},
-  url={https://github.com/yourusername/asnu}
+  url={https://github.com/kamielgulpen/asnu}
 }
 ```
 
@@ -170,4 +170,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Support
 
-For questions and support, please open an issue on [GitHub](https://github.com/yourusername/asnu/issues).
+For questions and support, please open an issue on [GitHub](https://github.com/kamielgulpen/asnu/issues).
