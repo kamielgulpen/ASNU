@@ -20,52 +20,6 @@ import numpy as np
 from scipy import stats
 import warnings
 
-
-def networkx_to_igraph(G_nx):
-    """
-    Convert a NetworkX graph to igraph.
-    
-    Parameters:
-    -----------
-    G_nx : networkx.Graph or networkx.DiGraph
-        NetworkX graph to convert
-        
-    Returns:
-    --------
-    igraph.Graph : Converted igraph graph
-    """
-    # Check if directed
-    directed = G_nx.is_directed()
-    
-    # Create igraph graph
-    G_ig = ig.Graph(directed=directed)
-    
-    # Add vertices
-    nodes = list(G_nx.nodes())
-    G_ig.add_vertices(len(nodes))
-    
-    # Create mapping from node labels to indices
-    node_to_idx = {node: idx for idx, node in enumerate(nodes)}
-    
-    # Store original node labels as vertex attribute
-    G_ig.vs['name'] = nodes
-    
-    # Copy node attributes
-    for attr in list(G_nx.nodes[nodes[0]].keys()) if nodes else []:
-        G_ig.vs[attr] = [G_nx.nodes[node].get(attr) for node in nodes]
-    
-    # Add edges
-    edges = [(node_to_idx[u], node_to_idx[v]) for u, v in G_nx.edges()]
-    G_ig.add_edges(edges)
-    
-    # Copy edge attributes
-    if G_nx.edges():
-        edge_attrs = list(G_nx.edges[list(G_nx.edges())[0]].keys())
-        for attr in edge_attrs:
-            G_ig.es[attr] = [G_nx.edges[edge].get(attr) for edge in G_nx.edges()]
-    
-    return G_ig
-
 def networkx_to_igraph(G_nx):
     """
     Convert a NetworkX graph to igraph.
@@ -450,7 +404,7 @@ def ofat_analysis(pops_path, links_path, scale=0.05,
                 mlflow.log_metric("input_preferential_attachment", params[0], step=simulation_count)
                 mlflow.log_metric("input_reciprocity", params[1], step=simulation_count)
                 mlflow.log_metric("input_transitivity", params[2], step=simulation_count)
-                mlflow.log_metric("input_number_of_communities", params[3], step=simulation_count)
+                mlflow.log_metric("input_number_of_communities", round(params[3] * 100), step=simulation_count)
 
                 # Log which parameter is being varied and its value
                 mlflow.log_metric(f"varied_param_{param_name}", param_value, step=simulation_count)
