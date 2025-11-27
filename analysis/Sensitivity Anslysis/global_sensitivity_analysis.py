@@ -18,7 +18,174 @@ from pathlib import Path
 import shutil
 from matplotlib import rcParams
 import seaborn as sns
+import igraph as ig
+import networkx as nx
+import numpy as np
+from scipy import stats
+import warnings
 
+def networkx_to_igraph(G_nx):
+    """
+    Convert a NetworkX graph to igraph.
+    
+    Parameters:
+    -----------
+    G_nx : networkx.Graph or networkx.DiGraph
+        NetworkX graph to convert
+        
+    Returns:
+    --------
+    igraph.Graph : Converted igraph graph
+    """
+    # Check if directed
+    directed = G_nx.is_directed()
+    
+    # Create igraph graph
+    G_ig = ig.Graph(directed=directed)
+    
+    # Add vertices
+    nodes = list(G_nx.nodes())
+    G_ig.add_vertices(len(nodes))
+    
+    # Create mapping from node labels to indices
+    node_to_idx = {node: idx for idx, node in enumerate(nodes)}
+    
+    # Store original node labels as vertex attribute
+    G_ig.vs['name'] = nodes
+    
+    # Copy node attributes
+    for attr in list(G_nx.nodes[nodes[0]].keys()) if nodes else []:
+        G_ig.vs[attr] = [G_nx.nodes[node].get(attr) for node in nodes]
+    
+    # Add edges
+    edges = [(node_to_idx[u], node_to_idx[v]) for u, v in G_nx.edges()]
+    G_ig.add_edges(edges)
+    
+    # Copy edge attributes
+    if G_nx.edges():
+        edge_attrs = list(G_nx.edges[list(G_nx.edges())[0]].keys())
+        for attr in edge_attrs:
+            G_ig.es[attr] = [G_nx.edges[edge].get(attr) for edge in G_nx.edges()]
+    
+    return G_ig
+
+
+def calculate_network_metrics(G, is_networkx=False):
+    """
+    Calculate network metrics using igraph.
+    Automatically converts from NetworkX if needed.
+    
+    Parameters:
+    -----------
+    G : igraph.Graph or networkx.Graph
+        The network graph
+    is_networkx : bool, optional
+        If True, treats G as NetworkX graph and converts it
+        If False (default), treats G as igraph graph
+        
+    Returns:
+    --------
+    dict : Dictionary of calculated metrics
+    """
+    # Convert from NetworkX if needed
+    if is_networkx or isinstance(G, (nx.Graph, nx.DiGraph, nx.MultiGraph, nx.MultiDiGraph)):
+        print("Converting NetworkX graph to igraph...")
+        G_ig = networkx_to_igraph(G)
+    else:
+        G_ig = G
+    
+    num_nodes = G_ig.vcount()
+    print(f"Calculating metrics for graph with {num_nodes} nodes and {G_ig.ecount()} edges...")
+    
+    # Reciprocity
+    print("Calculating reciprocity...")
+    reciprocity = G_ig.reciprocity()
+    
+    # Transitivity
+    print("Calculating transitivity...")
+    transitivity = G_ig.transitivity_undirected()
+    
+    # Average shortest path length
+    print("Calculating average path length...")
+    if num_nodes < 1000:
+        if G_ig.is_connected(mode="weak"):
+            avg_path_length = G_ig.average_path_length(directed=True)
+        else:
+            components = G_ig.connected_components(mode="weak")
+            largest_cc_idx = np.argmax(components.sizes())
+            largest_cc = components.subgraph(largest_cc_idx)
+            avg_path_length = (largest_cc.average_path_length(directed=True) 
+                             if largest_cc.vcount() > 1 else 0)
+    else:
+        # Sample for large networks
+        sample_size = min(500, num_nodes)
+        sample_nodes = np.random.choice(range(num_nodes), 
+                                       size=sample_size, replace=False)
+        path_lengths = []
+        
+        # Suppress the "Couldn't reach some vertices" warning
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            
+            for i in range(min(100, sample_size)):
+                source = int(sample_nodes[i])
+                targets = sample_nodes[i+1:min(i+10, sample_size)]
+                
+                for target in targets:
+                    target = int(target)
+                    try:
+                        # Get shortest path
+                        paths = G_ig.get_shortest_paths(source, target, mode="out")
+                        
+                        # Check if path exists (non-empty path)
+                        if paths and len(paths[0]) > 0:
+                            path_lengths.append(len(paths[0]) - 1)
+                    except Exception as e:
+                        # Skip if any error occurs
+                        continue
+        
+        avg_path_length = np.mean(path_lengths) if path_lengths else 0
+    
+    # Degree distribution skewness
+    print("Calculating degree skewness...")
+    degrees = G_ig.degree(mode="in" if G_ig.is_directed() else "all")
+    degree_skewness = stats.skew(degrees) if len(degrees) > 1 else 0
+    
+    # Degree assortativity
+    print("Calculating degree assortativity...")
+    try:
+        degree_assortativity = G_ig.assortativity_degree(directed=G_ig.is_directed())
+    except:
+        degree_assortativity = 0
+    
+    # Modularity via community detection
+    print("Calculating modularity...")
+    try:
+        # Try Leiden algorithm first (best quality)
+        communities = G_ig.community_leiden(objective_function='modularity')
+        modularity = communities.modularity
+        n_communities = len(communities)
+    except:
+        try:
+            # Fallback to Louvain
+            communities = G_ig.community_multilevel()
+            modularity = communities.modularity
+            n_communities = len(communities)
+        except:
+            modularity = 0
+            n_communities = 0
+    
+    print("Done!")
+    
+    return {
+        'reciprocity': reciprocity,
+        'transitivity': transitivity,
+        'avg_path_length': avg_path_length,
+        'degree_skewness': degree_skewness,
+        'degree_assortativity': degree_assortativity,
+        'modularity': modularity,
+        'n_communities': n_communities
+    }
 
 def run_model_sample(params, pops_path, links_path, scale=0.05):
     """Run network generation with given parameters and return metrics."""
@@ -44,94 +211,12 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
             base_path=temp_path
         )
 
-        # Calculate network metrics
-        import networkx as nx
-        from scipy import stats
-
         num_nodes = G.graph.number_of_nodes()
         num_edges = G.graph.number_of_edges()
 
         if num_nodes > 0 and num_edges > 0:
 
-            # Reciprocity
-            reciprocity_actual = nx.reciprocity(G.graph)
-
-            # Transitivity (global clustering coefficient)
-            transitivity_actual = nx.transitivity(G.graph)
-
-            # Average shortest path length (sample for large networks)
-            if num_nodes < 1000:
-                # For small networks, try to compute on largest connected component
-                if nx.is_weakly_connected(G.graph):
-                    avg_path_length = nx.average_shortest_path_length(G.graph)
-                else:
-                    # Get largest weakly connected component
-                    largest_cc = max(nx.weakly_connected_components(G.graph), key=len)
-                    subgraph = G.graph.subgraph(largest_cc)
-                    if len(largest_cc) > 1:
-                        avg_path_length = nx.average_shortest_path_length(subgraph)
-                    else:
-                        avg_path_length = 0
-            else:
-                # For large networks, sample pairs of nodes
-                sample_size = min(500, num_nodes)
-                sample_nodes = np.random.choice(list(G.graph.nodes()), size=sample_size, replace=False)
-                path_lengths = []
-                for i in range(min(100, sample_size)):
-                    source = sample_nodes[i]
-                    for j in range(i+1, min(i+10, sample_size)):
-                        target = sample_nodes[j]
-                        try:
-                            length = nx.shortest_path_length(G.graph, source, target)
-                            path_lengths.append(length)
-                        except nx.NetworkXNoPath:
-                            pass
-                avg_path_length = np.mean(path_lengths) if path_lengths else 0
-
-            # Degree distribution skewness
-            degrees = [d for n, d in G.graph.degree()]
-            if len(degrees) > 1:
-                degree_skewness = stats.skew(degrees)
-            else:
-                degree_skewness = 0
-
-            # Degree assortativity
-            try:
-                degree_assortativity = nx.degree_assortativity_coefficient(G.graph)
-            except:
-                degree_assortativity = 0
-
-            # Modularity (using community detection)
-            try:
-                # Use the communities from the network generation if available
-                if hasattr(G, 'communities') and G.communities:
-                    # Convert to list of sets format expected by networkx
-                    communities_list = [set(comm) for comm in G.communities.values()]
-                    modularity = nx.algorithms.community.modularity(G.graph, communities_list)
-                else:
-                    # Use Louvain community detection as fallback
-                    import networkx.algorithms.community as nx_comm
-                    communities = nx_comm.greedy_modularity_communities(G.graph)
-                    modularity = nx_comm.modularity(G.graph, communities)
-            except:
-                modularity = 0
-
-        else:
-            reciprocity_actual = 0
-            transitivity_actual = 0
-            avg_path_length = 0
-            degree_skewness = 0
-            degree_assortativity = 0
-            modularity = 0
-
-        metrics = {
-            'reciprocity': reciprocity_actual,
-            'transitivity': transitivity_actual,
-            'avg_path_length': avg_path_length,
-            'degree_skewness': degree_skewness,
-            'degree_assortativity': degree_assortativity,
-            'modularity': modularity
-        }
+            metrics = calculate_network_metrics(G.graph)
 
         # Clean up temporary network
         if os.path.exists(temp_path):
