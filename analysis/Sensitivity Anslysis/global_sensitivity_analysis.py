@@ -218,6 +218,14 @@ def pawn_analysis(pops_path, links_path, scale=0.05, save_interval=50, samples =
 
             # Log current sample metrics to MLflow in real-time
             step = i + 1
+
+            # Log input parameters
+            mlflow.log_metric("input_preferential_attachment", param_values[i][0], step=step)
+            mlflow.log_metric("input_reciprocity", param_values[i][1], step=step)
+            mlflow.log_metric("input_transitivity", param_values[i][2], step=step)
+            mlflow.log_metric("input_number_of_communities", param_values[i][3], step=step)
+
+            # Log output metrics
             for metric_name in metric_names:
                 mlflow.log_metric(f"sample_{metric_name}", metrics[metric_name], step=step)
 
@@ -335,7 +343,7 @@ def pawn_analysis(pops_path, links_path, scale=0.05, save_interval=50, samples =
 
 
 if __name__ == '__main__':
-    mlflow.set_experiment("network_sensitivity")
+    mlflow.set_experiment("global_network_sensitivity")
     mlflow.set_tracking_uri("./mlruns")
     print(mlflow.get_tracking_uri())
 
