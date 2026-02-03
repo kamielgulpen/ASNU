@@ -11,7 +11,7 @@ import time
 # Generate network
 pops = 'Data/tab_n_(with oplniv).csv'
 # as example we use group interaction data on a work / school layer
-links = 'Data/tab_werkschool.csv' 
+links = 'Data/tab_huishouden.csv' 
 
 start = time.perf_counter()
 # Your code here
@@ -22,9 +22,11 @@ graph = generate(
     preferential_attachment=0,      # Preferential attachment strength
     scale=0.1,                          # Population scaling
     reciprocity=0,                  # Reciprocal edge probability
-    transitivity = 1,                # friend of a friend is my friend probability
-    number_of_communities = 1,
-    base_path="my_network"          # Path for the FileBasedGraph's data
+    transitivity = 0,                # friend of a friend is my friend probability
+    number_of_communities = 40000,
+    fully_connect_communities=True,
+    base_path="my_network",
+    community_size_distribution="natural"          # Path for the FileBasedGraph's data
 )
 
 end = time.perf_counter()

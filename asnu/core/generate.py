@@ -25,6 +25,7 @@ import os
 import math
 import shutil
 import random
+from itertools import product
 
 import numpy as np
 import networkx as nx
@@ -76,7 +77,7 @@ def build_group_pair_to_communities_lookup(G, verbose=False):
 
     return group_pair_to_communities
 
-def populate_communities(G, num_communities, seed_groups):
+def populate_communities(G, num_communities, seed_groups, community_size_distribution='natural'):
     """
     Assign nodes to communities based on group affinity patterns.
 
@@ -92,8 +93,33 @@ def populate_communities(G, num_communities, seed_groups):
         Number of communities to create
     seed_groups : list
         Initial group IDs to seed each community
+    community_size_distribution : str or array-like, optional
+        Controls community size distribution:
+        - 'natural' (default): Let communities grow naturally based on group affinities
+        - 'uniform': Aim for equal-sized communities
+        - 'powerlaw': Create power-law distribution (few large, many small communities)
+        - array of floats: Custom target proportions (must sum to 1)
     """
     n_groups = int(np.sqrt(len(G.maximum_num_links)))
+
+    # Calculate target community sizes based on distribution type
+    total_nodes = len(list(G.graph.nodes))
+
+    if community_size_distribution == 'uniform':
+        # Equal-sized communities
+        target_sizes = np.ones(num_communities) / num_communities
+    elif community_size_distribution == 'powerlaw':
+        # Power-law distribution: few large, many small
+        ranks = np.arange(1, num_communities + 1)
+        sizes = 1.0 / (ranks ** 1.5)  # Adjust exponent for steeper/flatter distribution
+        target_sizes = sizes / sizes.sum()
+    elif isinstance(community_size_distribution, (list, np.ndarray)):
+        # Custom distribution
+        target_sizes = np.array(community_size_distribution)
+        if not np.isclose(target_sizes.sum(), 1.0):
+            raise ValueError("Custom community_size_distribution must sum to 1")
+    else:  # 'natural' or default
+        target_sizes = None
 
     # Initialize community affinity matrix with slight bias
     community_matrix = np.ones((num_communities, n_groups))
@@ -109,26 +135,75 @@ def populate_communities(G, num_communities, seed_groups):
             G.communities_to_nodes[(community_idx, group_id)] = []
         G.communities_to_groups[community_idx] = []
 
-    # Assign each node to a community based on group probabilities
-    for node in G.graph.nodes:
-        group = G.nodes_to_group[node]
-        probability_vector = G.probability_matrix[group]
+    # OPTIMIZED: Assign nodes in batches with faster random sampling
+    all_nodes = list(G.graph.nodes)
+    np.random.shuffle(all_nodes)  # Shuffle to mix groups in batches
 
-        # Calculate community assignment probabilities
-        group_probabilities = np.dot(community_matrix, probability_vector)
-        group_probabilities = group_probabilities / group_probabilities.sum()
+    # Track community sizes for distribution control
+    if target_sizes is not None:
+        community_sizes = np.zeros(num_communities, dtype=np.int32)
+        target_counts = (target_sizes * total_nodes).astype(np.int32)
 
-        # Assign node to community
-        community = np.random.choice(num_communities, p=group_probabilities)
+    batch_size = 2000  # Process nodes in batches to reduce matrix recalculations
+    x = 0
+    for batch_start in range(0, len(all_nodes), batch_size):
+        batch_end = min(batch_start + batch_size, len(all_nodes))
+        batch_nodes = all_nodes[batch_start:batch_end]
 
-        # Update community information
-        community_matrix[community, group] += 1
-        G.communities_to_nodes[(community, group)].append(node)
-        G.nodes_to_communities[node] = community
-        G.communities_to_groups[community].append(group)
+        # Pre-calculate affinity matrix once per batch: (num_communities, n_groups)
+        affinity_matrix = community_matrix @ G.probability_matrix.T
+        # Normalize each group's probabilities (columns sum to 1)
+        affinity_matrix = affinity_matrix / affinity_matrix.sum(axis=0, keepdims=True)
+
+        # Apply distribution control if specified
+        if target_sizes is not None:
+            # Penalize communities that exceed their target size
+            size_ratio = community_sizes / (target_counts + 1e-10)
+            # Communities above target get their probabilities reduced
+            penalty = np.maximum(0.1, 1.0 - size_ratio)  # Min 10% probability
+            affinity_matrix = affinity_matrix * penalty[:, np.newaxis]
+            # Re-normalize
+            affinity_matrix = affinity_matrix / affinity_matrix.sum(axis=0, keepdims=True)
+
+        # Pre-calculate cumulative probabilities for faster sampling
+        cumulative_matrix = np.cumsum(affinity_matrix, axis=0)
+
+        # Generate random values for entire batch
+        random_values = np.random.random(len(batch_nodes))
+
+        # Track batch updates to community matrix
+        batch_updates = np.zeros((num_communities, n_groups), dtype=np.int32)
+
+        # Assign communities for batch
+        for idx, node in enumerate(batch_nodes):
+            group = G.nodes_to_group[node]
+
+            # Fast sampling using searchsorted (10-20x faster than np.random.choice)
+            community = np.searchsorted(cumulative_matrix[:, group], random_values[idx])
+
+            # Track update for batch
+            batch_updates[community, group] += 1
+
+            # Update community membership
+            G.communities_to_nodes[(community, group)].append(node)
+            G.nodes_to_communities[node] = community
+            G.communities_to_groups[community].append(group)
+
+        # Apply all batch updates at once to community matrix
+        community_matrix += batch_updates
+
+        # Update size tracking
+        if target_sizes is not None:
+            for comm in range(num_communities):
+                community_sizes[comm] += batch_updates[comm, :].sum()
+
+        x += batch_size
+        print(x/len(all_nodes))
+            
+        
  
 
-def find_separated_groups(G, num_communities, verbose=False):
+def find_separated_groups(G, num_communities, verbose=False, community_size_distribution='natural'):
     """
     Identify groups with minimal inter-connections to seed communities.
 
@@ -143,6 +218,8 @@ def find_separated_groups(G, num_communities, verbose=False):
         Number of communities to create
     verbose : bool, optional
         Whether to print progress information
+    community_size_distribution : str or array-like, optional
+        Controls community size distribution (passed to populate_communities)
 
     Returns
     -------
@@ -200,7 +277,8 @@ def find_separated_groups(G, num_communities, verbose=False):
         print(f"Selected {len(selected_indices)} seed groups for {num_communities} communities")
 
     # Assign nodes to communities based on selected seed groups
-    populate_communities(G, num_communities, selected_indices)
+    populate_communities(G, num_communities, selected_indices, community_size_distribution)
+
 
     return selected_indices
 
@@ -247,7 +325,8 @@ def init_nodes(G, pops_path, scale=1, pop_column='n'):
 
 def init_links(G, links_path, fraction, scale, reciprocity_p, transitivity_p,
                number_of_communities, verbose=True,
-               src_suffix='_src', dst_suffix='_dst', link_column='n'):
+               src_suffix='_src', dst_suffix='_dst', link_column='n',
+               community_size_distribution='natural'):
     """
     Create edges in the graph based on interaction data.
 
@@ -305,7 +384,8 @@ def init_links(G, links_path, fraction, scale, reciprocity_p, transitivity_p,
         print(f"Total requested links: {total_links}")
 
     # Create community structure
-    find_separated_groups(G, number_of_communities, verbose=verbose)
+    find_separated_groups(G, number_of_communities, verbose=verbose,
+                         community_size_distribution=community_size_distribution)
 
     # Build lookup for efficient community-based link creation
     group_pair_to_communities = build_group_pair_to_communities_lookup(G, verbose=verbose)
@@ -348,6 +428,196 @@ def init_links(G, links_path, fraction, scale, reciprocity_p, transitivity_p,
                 print(f"  {warning}")
             if len(warnings) > 10:
                 print(f"  ... and {len(warnings) - 10} more")
+
+def analyze_community_distribution(G, verbose=True):
+    """
+    Analyze the distribution of communities and groups within communities.
+
+    Provides statistics about:
+    - Number of nodes per community
+    - Number of groups per community
+    - Distribution of groups across communities
+    - Community size statistics
+
+    Parameters
+    ----------
+    G : NetworkXGraph
+        Graph object with community and group assignments
+    verbose : bool, optional
+        Whether to print detailed statistics
+
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'community_sizes': dict mapping community_id to number of nodes
+        - 'community_group_counts': dict mapping community_id to number of unique groups
+        - 'community_group_distribution': dict mapping community_id to dict of group_id counts
+        - 'group_community_membership': dict mapping group_id to list of communities it appears in
+        - 'statistics': dict with summary statistics
+    """
+    analysis = {
+        'community_sizes': {},
+        'community_group_counts': {},
+        'community_group_distribution': {},
+        'group_community_membership': {},
+        'statistics': {}
+    }
+    print(analysis)
+    # Analyze each community
+    for community_id in range(G.number_of_communities):
+        # Count nodes in this community
+        nodes_in_community = [node for node, comm in G.nodes_to_communities.items()
+                             if comm == community_id]
+        analysis['community_sizes'][community_id] = len(nodes_in_community)
+
+        # Count groups in this community
+        groups_in_community = G.communities_to_groups.get(community_id, [])
+
+        # Get unique groups and their counts
+        from collections import Counter
+        group_counts = Counter(groups_in_community)
+        analysis['community_group_distribution'][community_id] = dict(group_counts)
+        analysis['community_group_counts'][community_id] = len(group_counts)
+
+    # Analyze group membership across communities
+    for group_id in G.group_ids:
+        communities_with_group = []
+        for community_id in range(G.number_of_communities):
+            groups_in_comm = G.communities_to_groups.get(community_id, [])
+            if group_id in groups_in_comm:
+                communities_with_group.append(community_id)
+        analysis['group_community_membership'][group_id] = communities_with_group
+
+    # Calculate summary statistics
+    community_sizes = list(analysis['community_sizes'].values())
+    group_counts = list(analysis['community_group_counts'].values())
+
+    analysis['statistics'] = {
+        'total_communities': G.number_of_communities,
+        'total_nodes': G.graph.number_of_nodes(),
+        'total_groups': len(G.group_ids),
+        'avg_nodes_per_community': np.mean(community_sizes) if community_sizes else 0,
+        'std_nodes_per_community': np.std(community_sizes) if community_sizes else 0,
+        'min_nodes_per_community': min(community_sizes) if community_sizes else 0,
+        'max_nodes_per_community': max(community_sizes) if community_sizes else 0,
+        'avg_groups_per_community': np.mean(group_counts) if group_counts else 0,
+        'std_groups_per_community': np.std(group_counts) if group_counts else 0,
+        'min_groups_per_community': min(group_counts) if group_counts else 0,
+        'max_groups_per_community': max(group_counts) if group_counts else 0,
+    }
+
+    # Calculate how many communities each group appears in
+    group_community_counts = [len(comms) for comms in analysis['group_community_membership'].values()]
+    analysis['statistics']['avg_communities_per_group'] = np.mean(group_community_counts) if group_community_counts else 0
+    analysis['statistics']['std_communities_per_group'] = np.std(group_community_counts) if group_community_counts else 0
+    analysis['statistics']['min_communities_per_group'] = min(group_community_counts) if group_community_counts else 0
+    analysis['statistics']['max_communities_per_group'] = max(group_community_counts) if group_community_counts else 0
+    print(analysis)
+    if verbose:
+        print("\n" + "="*60)
+        print("COMMUNITY DISTRIBUTION ANALYSIS")
+        print("="*60)
+
+        stats = analysis['statistics']
+        print(f"\nOverall Statistics:")
+        print(f"  Total communities: {stats['total_communities']}")
+        print(f"  Total nodes: {stats['total_nodes']}")
+        print(f"  Total groups: {stats['total_groups']}")
+
+        print(f"\nNodes per Community:")
+        print(f"  Mean: {stats['avg_nodes_per_community']:.2f} ± {stats['std_nodes_per_community']:.2f}")
+        print(f"  Range: [{stats['min_nodes_per_community']}, {stats['max_nodes_per_community']}]")
+
+        print(f"\nUnique Groups per Community:")
+        print(f"  Mean: {stats['avg_groups_per_community']:.2f} ± {stats['std_groups_per_community']:.2f}")
+        print(f"  Range: [{stats['min_groups_per_community']}, {stats['max_groups_per_community']}]")
+
+        print(f"\nCommunities per Group:")
+        print(f"  Mean: {stats['avg_communities_per_group']:.2f} ± {stats['std_communities_per_group']:.2f}")
+        print(f"  Range: [{stats['min_communities_per_group']}, {stats['max_communities_per_group']}]")
+
+        # Show detailed breakdown for first few communities if not too many
+        if G.number_of_communities <= 10:
+            print(f"\nDetailed Community Breakdown:")
+            for community_id in range(G.number_of_communities):
+                n_nodes = analysis['community_sizes'][community_id]
+                n_groups = analysis['community_group_counts'][community_id]
+                group_dist = analysis['community_group_distribution'][community_id]
+                print(f"  Community {community_id}: {n_nodes} nodes, {n_groups} unique groups")
+                print(f"    Group distribution: {dict(sorted(group_dist.items()))}")
+        else:
+            print(f"\n(Detailed breakdown omitted for {G.number_of_communities} communities)")
+            print(f"Sample - Community 0: {analysis['community_sizes'][0]} nodes, "
+                  f"{analysis['community_group_counts'][0]} unique groups")
+
+        print("="*60 + "\n")
+
+    return analysis
+
+def connect_all_within_communities(G, verbose=True):
+    """
+    Connect all nodes within each community to each other.
+
+    Creates a fully connected graph within each community using vectorized
+    operations for maximum efficiency.
+
+    Parameters
+    ----------
+    G : NetworkXGraph
+        Graph object with community assignments
+    verbose : bool, optional
+        Whether to print progress information
+
+    Returns
+    -------
+    dict
+        Statistics about edges created
+    """
+    verbose = False
+    if verbose:
+        print("\nConnecting all nodes within communities...")
+
+    stats = {
+        'total_edges': 0,
+        'edges_per_community': {}
+    }
+
+    # OPTIMIZED: Build community membership lookup once
+    communities_nodes = [[] for _ in range(G.number_of_communities)]
+    for node, comm in G.nodes_to_communities.items():
+        communities_nodes[comm].append(node)
+
+    # For each community, connect all nodes within it
+    for community_id in range(G.number_of_communities):
+        community_nodes = communities_nodes[community_id]
+
+        if len(community_nodes) == 0:
+            continue
+
+        # Use itertools.product to generate all pairs efficiently
+        # Filter out self-loops inline
+        edges_to_add = [(src, dst) for src, dst in product(community_nodes, repeat=2)
+                       if src != dst]
+
+        # Batch add edges (much faster than individual add_edge calls)
+        G.graph.add_edges_from(edges_to_add)
+
+        edges_added = len(edges_to_add)
+        stats['edges_per_community'][community_id] = edges_added
+        stats['total_edges'] += edges_added
+
+        # Progress reporting for large numbers of communities
+        if (community_id + 1) % 5000 == 0 or community_id == 0:
+            print(f"  Connected {community_id + 1}/{G.number_of_communities} communities ({(community_id + 1) / G.number_of_communities * 100:.1f}%)")
+
+        if verbose:
+            print(f"  Community {community_id}: {len(community_nodes)} nodes, {edges_added} edges")
+
+    if verbose:
+        print(f"  Total edges created: {stats['total_edges']}")
+
+    return stats
 
 def fill_unfulfilled_group_pairs(G, reciprocity_p, verbose=True):
     """
@@ -453,7 +723,9 @@ def fill_unfulfilled_group_pairs(G, reciprocity_p, verbose=True):
 
 def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
              transitivity, number_of_communities, base_path="graph_data", verbose=True,
-             pop_column='n', src_suffix='_src', dst_suffix='_dst', link_column='n'):
+             pop_column='n', src_suffix='_src', dst_suffix='_dst', link_column='n',
+             fill_unfulfilled=True, fully_connect_communities=False,
+             community_size_distribution='natural'):
     """
     Generate a population-based network using NetworkX.
 
@@ -489,6 +761,18 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
         Suffix for destination group columns in links_path (default '_dst')
     link_column : str, optional
         Column name for link counts in links_path (default 'n')
+    fill_unfulfilled : bool, optional
+        Whether to fill unfulfilled group pairs after initial link creation (default True)
+    fully_connect_communities : bool, optional
+        Whether to fully connect all nodes within each community, bypassing normal
+        link formation process (default False). When True, after community assignment,
+        all nodes in the same community are connected to each other.
+    community_size_distribution : str or array-like, optional
+        Controls community size distribution (default 'natural'):
+        - 'natural': Let communities grow naturally based on group affinities
+        - 'uniform': Aim for equal-sized communities
+        - 'powerlaw': Create power-law distribution (few large, many small communities)
+        - array of floats: Custom target proportions (must sum to 1)
 
     Returns
     -------
@@ -515,19 +799,53 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
         print(f"  Created {G.graph.number_of_nodes()} nodes")
         print("\nStep 2: Creating edges from interaction patterns...")
 
-    # Invert preferential attachment for internal representation
-    preferential_attachment_fraction = 1 - preferential_attachment
+    if fully_connect_communities:
+        # Skip normal link creation and just fully connect within communities
+        if verbose:
+            print("\nStep 2a: Setting up communities...")
 
-    # Create edges
-    init_links(G, links_path, preferential_attachment_fraction, scale,
-              reciprocity, transitivity, number_of_communities, verbose=verbose,
-              src_suffix=src_suffix, dst_suffix=dst_suffix, link_column=link_column)
+        # Still need to initialize link tracking and communities
+        df_n_group_links = read_file(links_path)
+        group_ids = G.group_ids
+        G.maximum_num_links = {(i, j): 0 for i in group_ids for j in group_ids}
 
-    if verbose:
-        print("\nStep 3: Filling remaining unfulfilled group pairs...")
+        # Calculate maximum links (for statistics tracking)
+        for idx, row in df_n_group_links.iterrows():
+            src_attrs = {k.replace(src_suffix, ''): row[k] for k in row.index if k.endswith(src_suffix)}
+            dst_attrs = {k.replace(dst_suffix, ''): row[k] for k in row.index if k.endswith(dst_suffix)}
 
-    # Complete any group pairs that didn't reach their target
-    fill_unfulfilled_group_pairs(G, reciprocity, verbose=verbose)
+            src_nodes, src_id = find_nodes(G, **src_attrs)
+            dst_nodes, dst_id = find_nodes(G, **dst_attrs)
+
+            G.maximum_num_links[(src_id, dst_id)] = int(math.ceil(row[link_column] * scale))
+
+        # Create community structure
+        find_separated_groups(G, number_of_communities, verbose=verbose,
+                             community_size_distribution=community_size_distribution)
+
+        if verbose:
+            print("\nStep 2b: Fully connecting nodes within communities...")
+
+        # Fully connect all nodes within each community
+        connect_all_within_communities(G, verbose=verbose)
+
+    else:
+        # Normal link creation process
+        # Invert preferential attachment for internal representation
+        preferential_attachment_fraction = 1 - preferential_attachment
+
+        # Create edges
+        init_links(G, links_path, preferential_attachment_fraction, scale,
+                  reciprocity, transitivity, number_of_communities, verbose=verbose,
+                  src_suffix=src_suffix, dst_suffix=dst_suffix, link_column=link_column,
+                  community_size_distribution=community_size_distribution)
+
+        if fill_unfulfilled:
+            if verbose:
+                print("\nStep 3: Filling remaining unfulfilled group pairs...")
+
+            # Complete any group pairs that didn't reach their target
+            fill_unfulfilled_group_pairs(G, reciprocity, verbose=verbose)
 
     # Save to disk
     G.finalize()
@@ -535,7 +853,7 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
     if verbose:
         # Calculate link fulfillment statistics
         total_requested = sum(G.maximum_num_links.values())
-        total_created = sum(G.existing_num_links.values())
+        total_created = G.graph.number_of_edges()
         fulfillment_rate = (total_created / total_requested * 100) if total_requested > 0 else 0
 
         # Count overfulfilled pairs
