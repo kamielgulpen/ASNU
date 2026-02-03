@@ -19,12 +19,13 @@ start = time.perf_counter()
 graph = generate(
     pops,                             # The group-level population data
     links,                            # The group-level interaction data
-    preferential_attachment=0,      # Preferential attachment strength
-    scale=0.1,                          # Population scaling
-    reciprocity=0,                  # Reciprocal edge probability
-    transitivity = 0,                # friend of a friend is my friend probability
-    number_of_communities = 40000,
-    fully_connect_communities=True,
+    preferential_attachment=0.9,     # Preferential attachment strength
+    scale=0.01,                       # Population scaling
+    reciprocity=0,                    # Reciprocal edge probability
+    transitivity = 0,                 # friend of a friend is my friend probability
+    number_of_communities = 500,
+    fill_unfulfilled=False,
+    pa_scope="global",
     base_path="my_network",
     community_size_distribution="natural"          # Path for the FileBasedGraph's data
 )

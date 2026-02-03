@@ -3,7 +3,8 @@ import math
 import random
 
 def establish_links(G, src_nodes, dst_nodes, src_id, dst_id,
-                  target_link_count, fraction, reciprocity_p, transitivity_p, valid_communities=None):
+                  target_link_count, fraction, reciprocity_p, transitivity_p,
+                  valid_communities=None, pa_scope="local"):
     """
     Create edges between source and destination nodes with preferential attachment.
 
@@ -33,6 +34,10 @@ def establish_links(G, src_nodes, dst_nodes, src_id, dst_id,
         Probability of creating transitive edges (0-1)
     valid_communities : list, optional
         Communities shared by both groups (precomputed for efficiency)
+    pa_scope : str, optional
+        Scope of preferential attachment popularity:
+        - "local": popularity stays within the community (default)
+        - "global": popularity spreads to all communities
 
     Returns
     -------
@@ -49,9 +54,6 @@ def establish_links(G, src_nodes, dst_nodes, src_id, dst_id,
     # Check if already over target
     if num_links > target_link_count:
         link_n_check = False
-
-    # Storage for destination nodes with preferential attachment
-    d_nodes_bins = {}
 
     # Use precomputed communities for this group pair
     possible_communities = valid_communities
@@ -84,17 +86,26 @@ def establish_links(G, src_nodes, dst_nodes, src_id, dst_id,
             # Get source nodes in this community
             src_node_lists[community_id] = G.communities_to_nodes[(community_id, src_id)]
 
-            # Create initial pool of destination nodes for preferential attachment
+        # Initialize global popularity pool for this community-group pair if needed
+        pool_key = (community_id, dst_id)
+        if pool_key not in G.popularity_pool:
             dst_community_nodes = G.communities_to_nodes[(community_id, dst_id)]
             if dst_community_nodes:
                 sample_size = math.ceil(len(dst_community_nodes) * fraction)
-                d_nodes_bins[community_id] = list(np.random.choice(dst_community_nodes,
-                                                                   size=sample_size,
-                                                                   replace=False))
+                G.popularity_pool[pool_key] = list(np.random.choice(dst_community_nodes,
+                                                                     size=sample_size,
+                                                                     replace=False))
+            else:
+                G.popularity_pool[pool_key] = []
+
+        # Skip if no destination nodes available
+        if not G.popularity_pool[pool_key]:
+            attempts += 1
+            continue
 
         # Select random source and destination nodes from this community
         s = random.choice(src_node_lists[community_id])
-        d_from_db = random.choice(d_nodes_bins[community_id])
+        d_from_db = random.choice(G.popularity_pool[pool_key])
 
         # Add edge if valid (no self-loops, no duplicates)
         if s != d_from_db and not G.graph.has_edge(s, d_from_db):
@@ -113,7 +124,19 @@ def establish_links(G, src_nodes, dst_nodes, src_id, dst_id,
 
             # Preferential attachment: add popular nodes back to the pool
             if random.uniform(0,1) > fraction and fraction != 1:
-                d_nodes_bins[community_id].append(d_from_db)
+                if pa_scope == "global":
+                    # Spread popularity across communities, but scale probability
+                    # to avoid N-fold amplification (where N = number of communities)
+                    # Each community gets the node with probability 1/N, so expected
+                    # total additions ≈ 1 (same as local mode)
+                    for comm_id in range(G.number_of_communities):
+                        if random.uniform(0, 1) < 1.0 / G.number_of_communities:
+                            global_key = (comm_id, dst_id)
+                            if global_key in G.popularity_pool:
+                                G.popularity_pool[global_key].append(d_from_db)
+                else:
+                    # Local: only add to current community's pool
+                    G.popularity_pool[pool_key].append(d_from_db)
 
             # Add edges to neighbors (clustering effect)
             if transitivity_p < random.uniform(0,1):
