@@ -85,6 +85,10 @@ class NetworkXGraph:
         self.probability_matrix = np.zeros((2,3))
         self.number_of_communities = 0
 
+        # Global popularity pool for preferential attachment with memory
+        # Keyed by (community_id, group_id) -> list of nodes (with duplicates for weighting)
+        self.popularity_pool = {}
+
         self._load_metadata()
 
     def _save_metadata(self):

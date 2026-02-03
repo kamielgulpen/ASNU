@@ -626,12 +626,21 @@ if __name__ == '__main__':
         'transitivity': 0,
         'number_of_communities': 0.01
     }
+    import subprocess
+    import sys
+
+    subprocess.Popen([
+        sys.executable, '-m', 'mlflow', 'ui',
+        '--backend-store-uri', mlflow.get_tracking_uri(),
+        '--port', '5000'
+    ])
+
 
     # Start fresh OFAT analysis
     results, sensitivities = ofat_analysis(
         pops_path=pops_path,
         links_path=links_path,
-        scale=0.01,
+        scale=0.1,
         baseline=baseline,
         n_samples_per_param=20,
         save_interval=5
@@ -649,11 +658,3 @@ if __name__ == '__main__':
     # )
 
     # Launch MLflow UI
-    import subprocess
-    import sys
-
-    subprocess.Popen([
-        sys.executable, '-m', 'mlflow', 'ui',
-        '--backend-store-uri', mlflow.get_tracking_uri(),
-        '--port', '5000'
-    ])

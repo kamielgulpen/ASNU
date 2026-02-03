@@ -204,6 +204,7 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
             pops_path=pops_path,
             links_path=links_path,
             preferential_attachment=preferential_attachment,
+            pa_scope="global",
             scale=scale,
             reciprocity=reciprocity,
             transitivity=transitivity,
@@ -274,34 +275,35 @@ def pawn_analysis(pops_path, links_path, scale=0.05, save_interval=50, samples =
         'num_vars': 4,
         'names': ['preferential_attachment', 'reciprocity', 'transitivity', 'number_of_communities'],
         'bounds': [
-            [0.0, 0.99],      # preferential_attachment
+            [0.0, 0.99],   # preferential_attachment
             [0.0, 1],      # reciprocity
             [0.0, 1],      # transitivity
-            [1, 100]          # number_of_communities
+            [1, 100]       # number_of_communities
         ]
     }
 
     # Define output metrics
     metric_names = ['reciprocity', 'transitivity', 'avg_path_length', 'degree_skewness', 'degree_assortativity', 'modularity']
 
-    # Generate samples using Latin Hypercube
-    param_values = latin.sample(problem, samples)
-    total_samples = len(param_values)
-
-    # Load checkpoint if resuming
+    # Load checkpoint if resuming, otherwise generate new samples
     if resume_run_id:
         checkpoint = load_checkpoint(resume_run_id)
         print(checkpoint)
+        param_values = checkpoint['param_values']  # Use saved parameter values
         outputs = checkpoint['outputs']
         start_idx = checkpoint['completed_idx']
+        total_samples = len(param_values)
         print(f"Resuming from sample {start_idx}/{total_samples}")
     else:
+        # Generate samples using Latin Hypercube only for fresh runs
+        param_values = latin.sample(problem, samples)
+        total_samples = len(param_values)
         outputs = {metric: np.zeros(total_samples) for metric in metric_names}
         start_idx = 0
         print(f"Starting fresh: {total_samples} simulations...")
 
-    # Run analysis
-    with mlflow.start_run(run_name="pawn_sensitivity") as run:
+    # Run analysis - resume existing run or start new one
+    with mlflow.start_run(run_id=resume_run_id, run_name="pawn_sensitivity") as run:
         # Print MLflow tracking information
         print("\n" + "="*60)
         print("MLFLOW TRACKING INFO")
@@ -462,15 +464,6 @@ if __name__ == '__main__':
     # Specify your data paths
     pops_path = 'Data/tab_n_(with oplniv).csv'
     links_path = 'Data/tab_werkschool.csv'
-    
-
-    # Start fresh
-    pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples = 500)
-
-    # To resume from a previous run:
-    # pawn_analysis(pops_path, links_path, scale=0.1, save_interval=10, samples =50, resume_run_id="6ae3d9cbba9e4dde910f9c47583ce280")
-
-    # Launch MLflow UI
     import subprocess
     import sys
 
@@ -479,3 +472,12 @@ if __name__ == '__main__':
         '--backend-store-uri', mlflow.get_tracking_uri(),
         '--port', '5000'
     ])
+
+    # Start fresh
+    pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples = 100)
+
+    # To resume from a previous run:
+    # pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples =500, resume_run_id="7504cc8f8b4d4d88831f1e5baf256a83")
+
+    # Launch MLflow UI
+

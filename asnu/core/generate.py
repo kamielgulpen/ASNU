@@ -282,9 +282,13 @@ def find_separated_groups(G, num_communities, verbose=False, community_size_dist
 
     return selected_indices
 
-def init_nodes(G, pops_path, scale=1, pop_column='n'):
+def init_nodes(G, pops_path, scale=1, pop_column='n', min_group_size=0):
     """
-    Initialize nodes from population data using NetworkX directly.
+    Initialize nodes from population data using stratified sampling.
+
+    Uses stratified allocation to preserve demographic proportions while scaling.
+    This approach ensures that small groups are not over-represented due to
+    ceiling effects in simple proportional scaling.
 
     Parameters
     ----------
@@ -296,19 +300,56 @@ def init_nodes(G, pops_path, scale=1, pop_column='n'):
         Population scaling factor (default 1)
     pop_column : str, optional
         Name of the column containing population counts (default 'n')
+    min_group_size : int, optional
+        Minimum nodes per group. Groups smaller than this after scaling
+        are set to this value to avoid empty groups (default 0)
     """
     group_desc_dict, characteristic_cols = desc_groups(pops_path, pop_column=pop_column)
 
+    # STRATIFIED ALLOCATION: Calculate proportional allocation with remainder distribution
+    total_pop = sum(group_info[pop_column] for group_info in group_desc_dict.values())
+    target_total = int(scale * total_pop)
+
+    # Allocate nodes proportionally to each group (using floor)
+    node_allocations = {}
+    allocated_total = 0
+
+    for group_id, group_info in group_desc_dict.items():
+        # Proportional allocation (floor to avoid over-allocation)
+        base_allocation = int(scale * group_info[pop_column])
+
+        # Apply minimum group size if specified and group is non-empty
+        if base_allocation > 0 and base_allocation < min_group_size:
+            base_allocation = min_group_size
+        elif base_allocation == 0 and group_info[pop_column] > 0 and min_group_size > 0:
+            base_allocation = min_group_size
+
+        node_allocations[group_id] = base_allocation
+        allocated_total += base_allocation
+
+    # Distribute remainder to maintain exact total (if not using min_group_size)
+    remainder = target_total - allocated_total
+    if remainder > 0 and min_group_size == 0:
+        # Sort groups by original size (largest first) to distribute remainder
+        group_sizes = [(gid, group_desc_dict[gid][pop_column])
+                       for gid in group_desc_dict.keys()]
+        group_sizes.sort(key=lambda x: x[1], reverse=True)
+
+        # Give remainder to largest groups in round-robin fashion
+        for i in range(remainder):
+            group_id = group_sizes[i % len(group_sizes)][0]
+            node_allocations[group_id] += 1
+
+    # Create nodes using stratified allocation
     node_id = 0
     for group_id, group_info in group_desc_dict.items():
         attrs = {col: group_info[col] for col in characteristic_cols}
         G.group_to_attrs[group_id] = attrs
-        n_nodes = int(np.ceil(scale * group_info[pop_column]))
+        n_nodes = node_allocations[group_id]
         G.group_to_nodes[group_id] = list(range(node_id, node_id + n_nodes))
 
-        # Add nodes using NetworkX directly with community attribute
+        # Add nodes using NetworkX directly
         for _ in range(n_nodes):
-
             G.graph.add_node(node_id, **attrs)
             G.nodes_to_group[node_id] = group_id
             node_id += 1
@@ -326,7 +367,7 @@ def init_nodes(G, pops_path, scale=1, pop_column='n'):
 def init_links(G, links_path, fraction, scale, reciprocity_p, transitivity_p,
                number_of_communities, verbose=True,
                src_suffix='_src', dst_suffix='_dst', link_column='n',
-               community_size_distribution='natural'):
+               community_size_distribution='natural', pa_scope='local'):
     """
     Create edges in the graph based on interaction data.
 
@@ -369,7 +410,10 @@ def init_links(G, links_path, fraction, scale, reciprocity_p, transitivity_p,
     group_ids = G.group_ids
     G.maximum_num_links = {(i, j): 0 for i in group_ids for j in group_ids}
 
-    # Calculate required links for each group pair
+    # STRATIFIED EDGE ALLOCATION: First calculate all link requirements
+    link_data = []
+    total_original_links = 0
+
     for idx, row in df_n_group_links.iterrows():
         src_attrs = {k.replace(src_suffix, ''): row[k] for k in row.index if k.endswith(src_suffix)}
         dst_attrs = {k.replace(dst_suffix, ''): row[k] for k in row.index if k.endswith(dst_suffix)}
@@ -377,11 +421,39 @@ def init_links(G, links_path, fraction, scale, reciprocity_p, transitivity_p,
         src_nodes, src_id = find_nodes(G, **src_attrs)
         dst_nodes, dst_id = find_nodes(G, **dst_attrs)
 
-        G.maximum_num_links[(src_id, dst_id)] = int(math.ceil(row[link_column] * scale))
+        original_links = row[link_column]
+        total_original_links += original_links
+
+        link_data.append({
+            'src_id': src_id,
+            'dst_id': dst_id,
+            'original': original_links
+        })
+
+    # Calculate target total links and allocate proportionally
+    target_total_links = int(scale * total_original_links)
+    allocated_links = 0
+
+    # First pass: allocate floor(scale * links) to each pair
+    for item in link_data:
+        base_allocation = int(scale * item['original'])
+        G.maximum_num_links[(item['src_id'], item['dst_id'])] = base_allocation
+        allocated_links += base_allocation
+
+    # Distribute remainder to largest link groups (most statistically stable)
+    remainder = target_total_links - allocated_links
+    if remainder > 0:
+        # Sort by original link count (largest first)
+        link_data.sort(key=lambda x: x['original'], reverse=True)
+
+        # Distribute remainder in round-robin to largest groups
+        for i in range(remainder):
+            item = link_data[i % len(link_data)]
+            G.maximum_num_links[(item['src_id'], item['dst_id'])] += 1
 
     if verbose:
         total_links = sum(G.maximum_num_links.values())
-        print(f"Total requested links: {total_links}")
+        print(f"Total requested links: {total_links} (target: {target_total_links})")
 
     # Create community structure
     find_separated_groups(G, number_of_communities, verbose=verbose,
@@ -414,7 +486,7 @@ def init_links(G, links_path, fraction, scale, reciprocity_p, transitivity_p,
         # Create links between the groups
         link_success = establish_links(G, src_nodes, dst_nodes, src_id, dst_id,
                                       num_requested_links, fraction, reciprocity_p,
-                                      transitivity_p, valid_communities)
+                                      transitivity_p, valid_communities, pa_scope)
 
         if not link_success:
             existing_links = G.existing_num_links[(src_id, dst_id)]
@@ -725,7 +797,7 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
              transitivity, number_of_communities, base_path="graph_data", verbose=True,
              pop_column='n', src_suffix='_src', dst_suffix='_dst', link_column='n',
              fill_unfulfilled=True, fully_connect_communities=False,
-             community_size_distribution='natural'):
+             community_size_distribution='natural', min_group_size=0, pa_scope='local'):
     """
     Generate a population-based network using NetworkX.
 
@@ -773,6 +845,13 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
         - 'uniform': Aim for equal-sized communities
         - 'powerlaw': Create power-law distribution (few large, many small communities)
         - array of floats: Custom target proportions (must sum to 1)
+    min_group_size : int, optional
+        Minimum nodes per group after scaling. Groups smaller than this
+        are set to this value to avoid empty groups (default 0)
+    pa_scope : str, optional
+        Scope of preferential attachment popularity (default 'local'):
+        - 'local': popularity stays within the community (intra-community)
+        - 'global': popularity spreads across all communities (inter-community)
 
     Returns
     -------
@@ -792,8 +871,8 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
 
     G = NetworkXGraph(base_path)
 
-    # Create nodes
-    init_nodes(G, pops_path, scale, pop_column=pop_column)
+    # Create nodes with stratified allocation
+    init_nodes(G, pops_path, scale, pop_column=pop_column, min_group_size=min_group_size)
 
     if verbose:
         print(f"  Created {G.graph.number_of_nodes()} nodes")
@@ -809,7 +888,10 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
         group_ids = G.group_ids
         G.maximum_num_links = {(i, j): 0 for i in group_ids for j in group_ids}
 
-        # Calculate maximum links (for statistics tracking)
+        # STRATIFIED EDGE ALLOCATION (same as in init_links)
+        link_data = []
+        total_original_links = 0
+
         for idx, row in df_n_group_links.iterrows():
             src_attrs = {k.replace(src_suffix, ''): row[k] for k in row.index if k.endswith(src_suffix)}
             dst_attrs = {k.replace(dst_suffix, ''): row[k] for k in row.index if k.endswith(dst_suffix)}
@@ -817,7 +899,32 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
             src_nodes, src_id = find_nodes(G, **src_attrs)
             dst_nodes, dst_id = find_nodes(G, **dst_attrs)
 
-            G.maximum_num_links[(src_id, dst_id)] = int(math.ceil(row[link_column] * scale))
+            original_links = row[link_column]
+            total_original_links += original_links
+
+            link_data.append({
+                'src_id': src_id,
+                'dst_id': dst_id,
+                'original': original_links
+            })
+
+        # Calculate target total links and allocate proportionally
+        target_total_links = int(scale * total_original_links)
+        allocated_links = 0
+
+        # First pass: allocate floor(scale * links) to each pair
+        for item in link_data:
+            base_allocation = int(scale * item['original'])
+            G.maximum_num_links[(item['src_id'], item['dst_id'])] = base_allocation
+            allocated_links += base_allocation
+
+        # Distribute remainder to largest link groups
+        remainder = target_total_links - allocated_links
+        if remainder > 0:
+            link_data.sort(key=lambda x: x['original'], reverse=True)
+            for i in range(remainder):
+                item = link_data[i % len(link_data)]
+                G.maximum_num_links[(item['src_id'], item['dst_id'])] += 1
 
         # Create community structure
         find_separated_groups(G, number_of_communities, verbose=verbose,
@@ -838,7 +945,7 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
         init_links(G, links_path, preferential_attachment_fraction, scale,
                   reciprocity, transitivity, number_of_communities, verbose=verbose,
                   src_suffix=src_suffix, dst_suffix=dst_suffix, link_column=link_column,
-                  community_size_distribution=community_size_distribution)
+                  community_size_distribution=community_size_distribution, pa_scope=pa_scope)
 
         if fill_unfulfilled:
             if verbose:
