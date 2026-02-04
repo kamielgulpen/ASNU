@@ -20,6 +20,59 @@ import numpy as np
 from scipy import stats
 import warnings
 
+def calculate_local_sensitivity(param_values, metric_values, method='central'):
+    """
+    Calculate local sensitivity using finite differences.
+    
+    Returns: array of sensitivities at each point
+    """
+    sensitivities = []
+    
+    for i in range(1, len(param_values) - 1):
+        if method == 'central':
+            # Central difference: (f(x+h) - f(x-h)) / (2h)
+            dy = metric_values[i+1] - metric_values[i-1]
+            dx = param_values[i+1] - param_values[i-1]
+        elif method == 'forward':
+            # Forward difference: (f(x+h) - f(x)) / h
+            dy = metric_values[i+1] - metric_values[i]
+            dx = param_values[i+1] - param_values[i]
+        
+        if dx != 0:
+            sensitivities.append(dy / dx)
+        else:
+            sensitivities.append(0)
+    
+    return np.array(sensitivities)
+
+
+def calculate_normalized_sensitivity(param_values, metric_values, baseline_idx=None):
+    """
+    Calculate normalized (relative) sensitivity: S = (x/y) * (dy/dx)
+    """
+    if baseline_idx is None:
+        baseline_idx = len(param_values) // 2  # Use middle point as baseline
+    
+    sensitivities = []
+    x0 = param_values[baseline_idx]
+    y0 = metric_values[baseline_idx]
+    
+    if y0 == 0:
+        return None  # Can't normalize by zero
+    
+    for i in range(1, len(param_values) - 1):
+        dy = metric_values[i+1] - metric_values[i-1]
+        dx = param_values[i+1] - param_values[i-1]
+        
+        if dx != 0:
+            # Normalized sensitivity: (x0/y0) * (dy/dx)
+            S = (x0 / y0) * (dy / dx)
+            sensitivities.append(S)
+        else:
+            sensitivities.append(0)
+    
+    return np.array(sensitivities)
+
 def networkx_to_igraph(G_nx):
     """
     Convert a NetworkX graph to igraph.
@@ -193,20 +246,25 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
     transitivity = params[2]
     number_of_communities = round(params[3] * 100)
 
+    print(number_of_communities)
+
     # Generate network in temporary directory
     temp_path = "temp_network_la"
 
     try:
+
         G = generate(
             pops_path=pops_path,
             links_path=links_path,
             preferential_attachment=preferential_attachment,
+            pa_scope="global",
             scale=scale,
             reciprocity=reciprocity,
             transitivity=transitivity,
             number_of_communities=number_of_communities,
             base_path=temp_path
         )
+
 
         # Calculate network metrics
         import networkx as nx
@@ -295,7 +353,7 @@ def ofat_analysis(pops_path, links_path, scale=0.05,
         'preferential_attachment': {'bounds': [0.0, 0.99], 'index': 0},
         'reciprocity': {'bounds': [0.0, 1.0], 'index': 1},
         'transitivity': {'bounds': [0.0, 1.0], 'index': 2},
-        'number_of_communities': {'bounds': [0.01, 1], 'index': 3, 'integer': True}
+        'number_of_communities': {'bounds': [0.01, 1], 'index': 3}
     }
 
     # Set baseline values (midpoint if not specified)
@@ -432,30 +490,35 @@ def ofat_analysis(pops_path, links_path, scale=0.05,
         print(f"\n{'='*60}")
         print(f"All simulations completed!")
         print(f"{'='*60}\n")
-
         # Calculate sensitivity metrics (normalized derivatives)
         sensitivity_results = {}
 
+        # Usage
         for param_name, data in results_data.items():
-            param_values = data['param_values']
+            param_values = np.array(data['param_values'])
             sensitivity_results[param_name] = {}
 
             for metric_name in metric_names:
                 metric_values = np.array(data['metrics'][metric_name])
+                
+                # Calculate local sensitivity
+                local_sens = calculate_local_sensitivity(param_values, metric_values)
+                
+                # Summary statistics for local sensitivity
+                mean_sensitivity = np.mean(np.abs(local_sens))
+                max_sensitivity = np.max(np.abs(local_sens))
+                
+                sensitivity_results[param_name][metric_name] = {
+                    'mean_abs_sensitivity': mean_sensitivity,
+                    'max_abs_sensitivity': max_sensitivity,
+                    'local_sensitivities': local_sens
+                }
+                
+                mlflow.log_metric(f"mean_sensitivity_{param_name}_{metric_name}", mean_sensitivity)
+                mlflow.log_metric(f"max_sensitivity_{param_name}_{metric_name}", max_sensitivity)
 
-                # Calculate normalized local sensitivity (approximate derivative)
-                # S = (dy/y) / (dx/x) where x is parameter, y is metric
-                param_range = param_values.max() - param_values.min()
-                metric_range = metric_values.max() - metric_values.min()
-
-                if param_range > 0 and metric_range > 0:
-                    # Simple normalized sensitivity: range of output / range of input
-                    sensitivity = metric_range / param_range
-                else:
-                    sensitivity = 0
-
-                sensitivity_results[param_name][metric_name] = sensitivity
-                mlflow.log_metric(f"sensitivity_{param_name}_{metric_name}", sensitivity)
+     
+     
 
         # Create visualizations
         create_ofat_visualizations(results_data, baseline, metric_names, sensitivity_results)
@@ -523,37 +586,48 @@ def create_ofat_visualizations(results_data, baseline, metric_names, sensitivity
     mlflow.log_artifact('user-data/outputs/ofat_parameter_sweeps.pdf')
     plt.close()
 
-    # 2. Sensitivity heatmap
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    # Prepare data for heatmap
+    # 2. Sensitivity heatmaps (Mean and Max)
     param_names = list(results_data.keys())
-    sensitivity_matrix = np.zeros((len(metric_names), len(param_names)))
 
-    for i, metric_name in enumerate(metric_names):
-        for j, param_name in enumerate(param_names):
-            sensitivity_matrix[i, j] = sensitivity_results[param_name][metric_name]
+    # Create figure with two subplots for mean and max sensitivity
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
-    # Create heatmap
-    im = ax.imshow(sensitivity_matrix, cmap='YlOrRd', aspect='auto')
+    sensitivity_types = [
+        ('mean_abs_sensitivity', 'Mean Absolute Sensitivity'),
+        ('max_abs_sensitivity', 'Max Absolute Sensitivity')
+    ]
 
-    # Set ticks and labels
-    ax.set_xticks(np.arange(len(param_names)))
-    ax.set_yticks(np.arange(len(metric_names)))
-    ax.set_xticklabels([p.replace('_', ' ').title() for p in param_names], rotation=45, ha='right')
-    ax.set_yticklabels([m.replace('_', ' ').title() for m in metric_names])
+    for ax_idx, (sens_key, sens_title) in enumerate(sensitivity_types):
+        ax = axes[ax_idx]
 
-    # Add colorbar
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label('Sensitivity (Range Ratio)', rotation=270, labelpad=20, fontweight='bold')
+        # Prepare data for heatmap
+        sensitivity_matrix = np.zeros((len(metric_names), len(param_names)))
 
-    # Add text annotations
-    for i in range(len(metric_names)):
-        for j in range(len(param_names)):
-            text = ax.text(j, i, f'{sensitivity_matrix[i, j]:.2f}',
-                          ha="center", va="center", color="black", fontsize=9)
+        for i, metric_name in enumerate(metric_names):
+            for j, param_name in enumerate(param_names):
+                sensitivity_matrix[i, j] = sensitivity_results[param_name][metric_name][sens_key]
 
-    ax.set_title('Local Sensitivity Matrix (OFAT)', fontweight='bold', pad=15)
+        # Create heatmap
+        im = ax.imshow(sensitivity_matrix, cmap='YlOrRd', aspect='auto')
+
+        # Set ticks and labels
+        ax.set_xticks(np.arange(len(param_names)))
+        ax.set_yticks(np.arange(len(metric_names)))
+        ax.set_xticklabels([p.replace('_', ' ').title() for p in param_names], rotation=45, ha='right')
+        ax.set_yticklabels([m.replace('_', ' ').title() for m in metric_names])
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Sensitivity', rotation=270, labelpad=20, fontweight='bold')
+
+        # Add text annotations
+        for i in range(len(metric_names)):
+            for j in range(len(param_names)):
+                text = ax.text(j, i, f'{sensitivity_matrix[i, j]:.2f}',
+                              ha="center", va="center", color="black", fontsize=9)
+
+        ax.set_title(f'{sens_title} (OFAT)', fontweight='bold', pad=15)
+
     plt.tight_layout()
     plt.savefig('user-data/outputs/ofat_sensitivity_heatmap.png', dpi=300, bbox_inches='tight')
     plt.savefig('user-data/outputs/ofat_sensitivity_heatmap.pdf', bbox_inches='tight')
@@ -561,8 +635,8 @@ def create_ofat_visualizations(results_data, baseline, metric_names, sensitivity
     mlflow.log_artifact('user-data/outputs/ofat_sensitivity_heatmap.pdf')
     plt.close()
 
-    # 3. Sensitivity bar chart (similar to global analysis)
-    fig, ax = plt.subplots(figsize=(12, 6))
+    # 3. Sensitivity bar charts (Mean and Max)
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
 
     param_names = list(results_data.keys())
     n_params = len(param_names)
@@ -570,32 +644,40 @@ def create_ofat_visualizations(results_data, baseline, metric_names, sensitivity
     x_pos = np.arange(n_params)
     colors = sns.color_palette("Set2", n_colors=n_metrics)
 
-    for idx, metric_name in enumerate(metric_names):
-        sensitivities = [sensitivity_results[param][metric_name] for param in param_names]
-        offset = (idx - n_metrics/2 + 0.5) * bar_width
-        ax.bar(x_pos + offset, sensitivities, bar_width,
-               label=metric_name.replace("_", " ").title(),
-               alpha=0.85, color=colors[idx],
-               edgecolor='black', linewidth=0.5)
+    sensitivity_types = [
+        ('mean_abs_sensitivity', 'Mean Absolute Sensitivity'),
+        ('max_abs_sensitivity', 'Max Absolute Sensitivity')
+    ]
 
-    ax.set_xlabel('Parameters', fontweight='bold')
-    ax.set_ylabel('Local Sensitivity', fontweight='bold')
-    ax.set_title('Local Sensitivity Analysis (OFAT): Parameter Impact on Metrics',
-                fontweight='bold', pad=15)
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels([p.replace('_', ' ').title() for p in param_names],
-                       rotation=45, ha='right')
+    for ax_idx, (sens_key, sens_title) in enumerate(sensitivity_types):
+        ax = axes[ax_idx]
 
-    # Grid and spines
-    ax.grid(axis='y', alpha=0.25, linestyle='--', linewidth=0.5)
-    ax.set_axisbelow(True)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_linewidth(0.8)
-    ax.spines['bottom'].set_linewidth(0.8)
+        for idx, metric_name in enumerate(metric_names):
+            sensitivities = [sensitivity_results[param][metric_name][sens_key] for param in param_names]
+            offset = (idx - n_metrics/2 + 0.5) * bar_width
+            ax.bar(x_pos + offset, sensitivities, bar_width,
+                   label=metric_name.replace("_", " ").title(),
+                   alpha=0.85, color=colors[idx],
+                   edgecolor='black', linewidth=0.5)
 
-    ax.legend(loc='upper right', frameon=True, fancybox=False,
-             shadow=False, framealpha=0.95, edgecolor='black')
+        ax.set_xlabel('Parameters', fontweight='bold')
+        ax.set_ylabel('Local Sensitivity', fontweight='bold')
+        ax.set_title(f'{sens_title} (OFAT): Parameter Impact on Metrics',
+                    fontweight='bold', pad=15)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([p.replace('_', ' ').title() for p in param_names],
+                           rotation=45, ha='right')
+
+        # Grid and spines
+        ax.grid(axis='y', alpha=0.25, linestyle='--', linewidth=0.5)
+        ax.set_axisbelow(True)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_linewidth(0.8)
+        ax.spines['bottom'].set_linewidth(0.8)
+
+        ax.legend(loc='upper right', frameon=True, fancybox=False,
+                 shadow=False, framealpha=0.95, edgecolor='black')
 
     plt.tight_layout()
     plt.savefig('user-data/outputs/ofat_sensitivity_bars.png', dpi=300, bbox_inches='tight')
@@ -640,7 +722,7 @@ if __name__ == '__main__':
     results, sensitivities = ofat_analysis(
         pops_path=pops_path,
         links_path=links_path,
-        scale=0.1,
+        scale=0.01,
         baseline=baseline,
         n_samples_per_param=20,
         save_interval=5

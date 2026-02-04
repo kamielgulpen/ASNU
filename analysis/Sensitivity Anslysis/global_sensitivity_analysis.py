@@ -193,8 +193,8 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
     # Extract parameters
     preferential_attachment = params[0]
     reciprocity = params[1]
-    transitivity = params[2]
-    number_of_communities = int(params[3])
+    # transitivity = params[2]
+    number_of_communities = int(params[2])
 
     # Generate network in temporary directory
     temp_path = "temp_network_sa"
@@ -207,7 +207,7 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
             pa_scope="global",
             scale=scale,
             reciprocity=reciprocity,
-            transitivity=transitivity,
+            transitivity=0,
             number_of_communities=number_of_communities,
             base_path=temp_path
         )
@@ -272,12 +272,17 @@ def pawn_analysis(pops_path, links_path, scale=0.05, save_interval=50, samples =
 
     # Define parameter space (without scale)
     problem = {
-        'num_vars': 4,
-        'names': ['preferential_attachment', 'reciprocity', 'transitivity', 'number_of_communities'],
+        'num_vars': 3,
+        'names': [
+            'preferential_attachment', 
+            'reciprocity', 
+            # 'transitivity', 
+            'number_of_communities'
+            ],
         'bounds': [
             [0.0, 0.99],   # preferential_attachment
             [0.0, 1],      # reciprocity
-            [0.0, 1],      # transitivity
+            # [0.0, 1],      # transitivity
             [1, 100]       # number_of_communities
         ]
     }
@@ -336,8 +341,8 @@ def pawn_analysis(pops_path, links_path, scale=0.05, save_interval=50, samples =
             # Log input parameters
             mlflow.log_metric("input_preferential_attachment", param_values[i][0], step=step)
             mlflow.log_metric("input_reciprocity", param_values[i][1], step=step)
-            mlflow.log_metric("input_transitivity", param_values[i][2], step=step)
-            mlflow.log_metric("input_number_of_communities", param_values[i][3], step=step)
+            # mlflow.log_metric("input_transitivity", param_values[i][2], step=step)
+            mlflow.log_metric("input_number_of_communities", param_values[i][2], step=step)
 
             # Log output metrics
             for metric_name in metric_names:
@@ -474,7 +479,7 @@ if __name__ == '__main__':
     ])
 
     # Start fresh
-    pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples = 100)
+    pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples = 500)
 
     # To resume from a previous run:
     # pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples =500, resume_run_id="7504cc8f8b4d4d88831f1e5baf256a83")

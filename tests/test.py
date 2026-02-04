@@ -11,7 +11,7 @@ import time
 # Generate network
 pops = 'Data/tab_n_(with oplniv).csv'
 # as example we use group interaction data on a work / school layer
-links = 'Data/tab_huishouden.csv' 
+links = 'Data/tab_werkschool.csv' 
 
 start = time.perf_counter()
 # Your code here
@@ -19,20 +19,18 @@ start = time.perf_counter()
 graph = generate(
     pops,                             # The group-level population data
     links,                            # The group-level interaction data
-    preferential_attachment=0.9,     # Preferential attachment strength
-    scale=0.01,                       # Population scaling
+    preferential_attachment=0,     # Preferential attachment strength
+    scale=0.1,                       # Population scaling
     reciprocity=0,                    # Reciprocal edge probability
-    transitivity = 0,                 # friend of a friend is my friend probability
-    number_of_communities = 500,
-    fill_unfulfilled=False,
+    transitivity =0,                 # friend of a friend is my friend probability
+    number_of_communities = 100,
     pa_scope="global",
-    base_path="my_network",
-    community_size_distribution="natural"          # Path for the FileBasedGraph's data
+    base_path="my_network",        # Path for the FileBasedGraph's data
 )
 
 end = time.perf_counter()
 print(f"Execution time: {end - start:.4f} seconds")
-G_rx = rx.PyGraph()
+G_rx = rx.PyDiGraph()
 G_nx = graph.graph
 # Create node mapping (NetworkX ID -> rustworkx index)
 node_map = {}
@@ -47,10 +45,10 @@ for u, v, edge_attrs in G_nx.edges(data=True):
 
 print(f"Graph: {len(G_rx)} nodes, {G_rx.num_edges()} edges")
 print(f"Transitivity:{rx.transitivity(G_rx)}")
-# print(f"Reciprocity:{nx.reciprocity(G_nx)}")
+# print(f"Transitivity (nx):{nx.transitivity(G_nx)}")
 
 # Get degree sequence
-degrees = [G_rx.degree(node) for node in G_rx.node_indices()]
+degrees = [G_rx.in_degree(node) for node in G_rx.node_indices()]
 
 print(f"Mean degree: {np.mean(degrees):.2f}")
 print(f"Std degree: {np.std(degrees):.2f}")
