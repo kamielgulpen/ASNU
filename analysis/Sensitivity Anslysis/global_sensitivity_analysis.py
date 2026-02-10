@@ -283,7 +283,7 @@ def pawn_analysis(pops_path, links_path, scale=0.05, save_interval=50, samples =
             [0.0, 0.99],   # preferential_attachment
             [0.0, 1],      # reciprocity
             # [0.0, 1],      # transitivity
-            [1, 100]       # number_of_communities
+            [1, 1000]       # number_of_communities
         ]
     }
 
@@ -479,10 +479,10 @@ if __name__ == '__main__':
     ])
 
     # Start fresh
-    pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples = 500)
+    # pawn_analysis(pops_path, links_path, scale=0.1, save_interval=10, samples = 500)
 
     # To resume from a previous run:
-    # pawn_analysis(pops_path, links_path, scale=0.01, save_interval=10, samples =500, resume_run_id="7504cc8f8b4d4d88831f1e5baf256a83")
+    pawn_analysis(pops_path, links_path, scale=0.1, save_interval=10, samples =500, resume_run_id="d1615b7df4d643d7b89777bd54e4e65e")
 
     # Launch MLflow UI
 

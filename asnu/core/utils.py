@@ -2,6 +2,45 @@
 
 import pandas as pd
 
+
+def stratified_allocate(items, scale):
+    """
+    Allocate integer counts from fractional scaled values, preserving the total.
+
+    Each item gets floor(scale * original), then the remainder is distributed
+    round-robin to the largest items to maintain the exact scaled total.
+
+    Parameters
+    ----------
+    items : list of (key, original_value) tuples
+        The items to allocate counts to, with their original values
+    scale : float
+        Scaling factor
+
+    Returns
+    -------
+    dict
+        Mapping from key to allocated integer count
+    """
+    total_original = sum(v for _, v in items)
+    target_total = int(scale * total_original)
+
+    allocations = {}
+    allocated = 0
+    for key, original in items:
+        alloc = int(scale * original)
+        allocations[key] = alloc
+        allocated += alloc
+
+    remainder = target_total - allocated
+    if remainder > 0:
+        sorted_items = sorted(items, key=lambda x: x[1], reverse=True)
+        for i in range(remainder):
+            key = sorted_items[i % len(sorted_items)][0]
+            allocations[key] += 1
+
+    return allocations
+
 def find_nodes(G, **attrs):
     """
     Finds the list of nodes in the graph associated that have attrs attributes.   
