@@ -18,16 +18,16 @@ create_communities(pops, links,
                    scale=0.1, number_of_communities=2500,
                    output_path='my_communities.json')
 
-graph = generate(
-    pops,                             # The group-level population data
-    links,                            # The group-level interaction data
-    preferential_attachment=0,        # Preferential attachment strength
-    scale=0.1,                          # Population scaling
-    reciprocity=1,                    # Reciprocal edge probability
-    transitivity =1,
-    community_file='my_communities.json',                  # friend of a friend is my friend probability
-    base_path="my_network",           # Path for the FileBasedGraph's data
-)
+# graph = generate(
+#     pops,                             # The group-level population data
+#     links,                            # The group-level interaction data
+#     preferential_attachment=0,        # Preferential attachment strength
+#     scale=0.1,                          # Population scaling
+#     reciprocity=1,                    # Reciprocal edge probability
+#     transitivity =1,
+#     community_file='my_communities.json',                  # friend of a friend is my friend probability
+#     base_path="my_network",           # Path for the FileBasedGraph's data
+# )
 
 end = time.perf_counter()
 print(f"Execution time: {end - start:.4f} seconds")
