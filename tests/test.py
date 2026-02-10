@@ -14,7 +14,7 @@ pops = 'Data/tab_n_(with oplniv).csv'
 start = time.perf_counter()
 # # Step 1: Create communities separately
 create_communities(pops, links,
-                   scale=0.1, number_of_communities=2500,
+                   scale=0.01, number_of_communities=250,
                    output_path='my_communities.json')
 
 # graph = generate(
