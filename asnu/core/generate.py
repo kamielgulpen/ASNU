@@ -167,11 +167,9 @@ def _setup_no_community_structure(G):
         G.nodes_to_communities[node] = 0
 
 
-def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
-                       verbose, src_suffix, dst_suffix, pa_scope):
-    """
-    Run the edge creation loop using the community structure already set on G.
-    """
+def _run_edge_creation_python(G, links_path, fraction, reciprocity_p, transitivity_p,
+                              verbose, src_suffix, dst_suffix, pa_scope):
+    """Pure-Python fallback for edge creation."""
     warnings = []
     df_n_group_links = read_file(links_path)
 
@@ -211,6 +209,60 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
                 print(f"  {warning}")
             if len(warnings) > 10:
                 print(f"  ... and {len(warnings) - 10} more")
+
+
+def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
+                       verbose, src_suffix, dst_suffix, pa_scope):
+    """
+    Run the edge creation loop using the community structure already set on G.
+    Tries Rust backend, falls back to Python.
+    """
+    try:
+        from asnu_rust import run_edge_creation as rust_edge_creation
+    except ImportError:
+        _run_edge_creation_python(G, links_path, fraction, reciprocity_p,
+                                  transitivity_p, verbose, src_suffix, dst_suffix, pa_scope)
+        return
+
+    if verbose:
+        print("Using Rust backend for edge creation...")
+
+    df_n_group_links = read_file(links_path)
+    group_pair_to_communities = build_group_pair_to_communities_lookup(G, verbose=verbose)
+
+    # Build group_pairs list: (src_id, dst_id, target_link_count)
+    group_pairs = []
+    for _, row in df_n_group_links.iterrows():
+        src_attrs = {k.replace(src_suffix, ''): row[k] for k in row.index if k.endswith(src_suffix)}
+        dst_attrs = {k.replace(dst_suffix, ''): row[k] for k in row.index if k.endswith(dst_suffix)}
+        src_nodes, src_id = find_nodes(G, **src_attrs)
+        dst_nodes, dst_id = find_nodes(G, **dst_attrs)
+        if not src_nodes or not dst_nodes:
+            continue
+        target = G.maximum_num_links[(src_id, dst_id)]
+        group_pairs.append((src_id, dst_id, target))
+
+    # Convert G data to plain dicts for Rust
+    ctn = {(int(k[0]), int(k[1])): [int(n) for n in v]
+           for k, v in G.communities_to_nodes.items()}
+    ntg = {int(k): int(v) for k, v in G.nodes_to_group.items()}
+    mnl = {(int(k[0]), int(k[1])): int(v) for k, v in G.maximum_num_links.items()}
+    vcm = {(int(k[0]), int(k[1])): [int(c) for c in v]
+           for k, v in group_pair_to_communities.items()}
+
+    new_edges, link_counts = rust_edge_creation(
+        group_pairs, vcm, mnl, ctn, ntg,
+        fraction, reciprocity_p, transitivity_p,
+        pa_scope, G.number_of_communities,
+    )
+
+    # Apply edges to the NetworkX graph
+    G.graph.add_edges_from(new_edges)
+    for src, dst, count in link_counts:
+        G.existing_num_links[(src, dst)] = count
+
+    if verbose:
+        print(f"\n  Created {len(new_edges)} edges")
 
 
 def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
