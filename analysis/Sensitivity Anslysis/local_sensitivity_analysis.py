@@ -244,7 +244,7 @@ def run_model_sample(params, pops_path, links_path, scale=0.05):
     preferential_attachment = params[0]
     reciprocity = params[1]
     transitivity = params[2]
-    number_of_communities = round(params[3] * 100)
+    number_of_communities = round(params[3] * 1000)
 
     print(number_of_communities)
 
@@ -353,7 +353,7 @@ def ofat_analysis(pops_path, links_path, scale=0.05,
         'preferential_attachment': {'bounds': [0.0, 0.99], 'index': 0},
         'reciprocity': {'bounds': [0.0, 1.0], 'index': 1},
         'transitivity': {'bounds': [0.0, 1.0], 'index': 2},
-        'number_of_communities': {'bounds': [0.01, 1], 'index': 3}
+        'number_of_communities': {'bounds': [0.001, 1], 'index': 3}
     }
 
     # Set baseline values (midpoint if not specified)
@@ -362,7 +362,7 @@ def ofat_analysis(pops_path, links_path, scale=0.05,
             'preferential_attachment': 0,
             'reciprocity': 0,
             'transitivity': 0,
-            'number_of_communities': 0.01
+            'number_of_communities': 0.001
         }
 
     # Define output metrics
@@ -374,6 +374,21 @@ def ofat_analysis(pops_path, links_path, scale=0.05,
         results_data = checkpoint['results_data']
         completed_params = checkpoint['completed_params']
         print(f"Resuming from checkpoint. Completed parameters: {completed_params}")
+
+        # Check and update run status if needed
+        client = mlflow.tracking.MlflowClient()
+        try:
+            run_info = client.get_run(resume_run_id).info
+            print(f"Previous run status: {run_info.status}")
+            print(f"Previous run experiment ID: {run_info.experiment_id}")
+
+            # Restore run to RUNNING status if it was terminated
+            from mlflow.entities import RunStatus
+            if run_info.status != RunStatus.to_string(RunStatus.RUNNING):
+                client.update_run(resume_run_id, status="RUNNING")
+                print(f"Reactivated run {resume_run_id} for continued logging")
+        except Exception as e:
+            print(f"Warning: Could not check/update run status: {e}")
     else:
         results_data = {}
         completed_params = []
@@ -383,8 +398,8 @@ def ofat_analysis(pops_path, links_path, scale=0.05,
     total_simulations = len(param_info) * n_samples_per_param
     completed_simulations = len(completed_params) * n_samples_per_param
 
-    # Run analysis
-    with mlflow.start_run(run_name="ofat_local_sensitivity") as run:
+    # Run analysis - resume existing run if provided, otherwise create new
+    with mlflow.start_run(run_id=resume_run_id, run_name="ofat_local_sensitivity" if not resume_run_id else None) as run:
         # Print MLflow tracking information
         print("\n" + "="*60)
         print("MLFLOW TRACKING INFO - LOCAL OFAT SENSITIVITY")
@@ -396,18 +411,19 @@ def ofat_analysis(pops_path, links_path, scale=0.05,
         print(f"\nView experiment at: {mlflow.get_tracking_uri()}")
         print("="*60 + "\n")
 
-        # Log configuration
-        mlflow.log_param("analysis_type", "OFAT")
-        mlflow.log_param("n_samples_per_param", n_samples_per_param)
-        mlflow.log_param("total_simulations", total_simulations)
-        mlflow.log_param("checkpoint_interval", save_interval)
-        mlflow.log_param("pops_path", pops_path)
-        mlflow.log_param("links_path", links_path)
-        mlflow.log_param("scale", scale)
-        for param_name, value in baseline.items():
-            mlflow.log_param(f"baseline_{param_name}", value)
-        if resume_run_id:
-            mlflow.log_param("resumed_from", resume_run_id)
+        # Log configuration (only for fresh runs - params are immutable)
+        if not resume_run_id:
+            mlflow.log_param("analysis_type", "OFAT")
+            mlflow.log_param("n_samples_per_param", n_samples_per_param)
+            mlflow.log_param("total_simulations", total_simulations)
+            mlflow.log_param("checkpoint_interval", save_interval)
+            mlflow.log_param("pops_path", pops_path)
+            mlflow.log_param("links_path", links_path)
+            mlflow.log_param("scale", scale)
+            for param_name, value in baseline.items():
+                mlflow.log_param(f"baseline_{param_name}", value)
+        else:
+            print(f"Resuming run - skipping parameter logging (already set)")
 
         # Perform OFAT analysis
         simulation_count = completed_simulations
@@ -457,6 +473,7 @@ def ofat_analysis(pops_path, links_path, scale=0.05,
 
                 # Log to MLflow
                 simulation_count += 1
+                print(f"  Logging metrics at step {simulation_count}...")
 
                 # Log all input parameters used in this simulation
                 mlflow.log_metric("input_preferential_attachment", params[0], step=simulation_count)
@@ -693,8 +710,9 @@ def create_ofat_visualizations(results_data, baseline, metric_names, sensitivity
 
 
 if __name__ == '__main__':
-    mlflow.set_experiment("local_network_sensitivity")
+    # IMPORTANT: Set tracking URI BEFORE setting experiment
     mlflow.set_tracking_uri("./mlruns")
+    mlflow.set_experiment("local_network_sensitivity")
     print(f"MLflow Tracking URI: {mlflow.get_tracking_uri()}")
 
     # Specify your data paths
@@ -706,7 +724,7 @@ if __name__ == '__main__':
         'preferential_attachment': 0,
         'reciprocity': 0,
         'transitivity': 0,
-        'number_of_communities': 0.01
+        'number_of_communities': 0.001
     }
     import subprocess
     import sys
@@ -718,11 +736,11 @@ if __name__ == '__main__':
     ])
 
 
-    # Start fresh OFAT analysis
+    # # Start fresh OFAT analysis
     results, sensitivities = ofat_analysis(
         pops_path=pops_path,
         links_path=links_path,
-        scale=0.01,
+        scale=0.1,
         baseline=baseline,
         n_samples_per_param=20,
         save_interval=5
@@ -732,11 +750,11 @@ if __name__ == '__main__':
     # results, sensitivities = ofat_analysis(
     #     pops_path=pops_path,
     #     links_path=links_path,
-    #     scale=0.01,
+    #     scale=0.1,
     #     baseline=baseline,
     #     n_samples_per_param=20,
     #     save_interval=5,
-    #     resume_run_id="your_run_id_here"
+    #     resume_run_id="d60578f7bd1047bab36b27fc1264987a"
     # )
 
     # Launch MLflow UI

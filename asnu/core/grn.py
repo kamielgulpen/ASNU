@@ -2,7 +2,7 @@ import numpy as np
 import math
 import random
 
-def establish_links(G, src_nodes, dst_nodes, src_id, dst_id,
+def establish_links(G, src_id, dst_id,
                   target_link_count, fraction, reciprocity_p, transitivity_p,
                   valid_communities=None, pa_scope="local"):
     """
@@ -16,10 +16,6 @@ def establish_links(G, src_nodes, dst_nodes, src_id, dst_id,
     ----------
     G : NetworkXGraph
         Graph object with network data and metadata
-    src_nodes : list
-        Source node IDs
-    dst_nodes : list
-        Destination node IDs
     src_id : int
         Source group ID
     dst_id : int
