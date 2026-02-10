@@ -5,7 +5,8 @@ import rustworkx as rx
 import matplotlib.pyplot as plt
 from asnu import generate, create_communities
 import time
-
+import pickle
+from scipy import stats
 # Generate network
 links = 'Data/tab_buren.csv'
 # as example we use group interaction data on a work / school layer
@@ -59,8 +60,19 @@ print(f"Min degree: {min(degrees)}")
 print(f"Median degree: {np.median(degrees)}")
 print(f"first q degree: {np.quantile(degrees, 0.25)}")
 print(f"fourth q degree: {np.quantile(degrees, 0.75)}")
+print(f"skew: {stats.skew(degrees)}")
+
 
 plt.hist(degrees, bins = 50)
 plt.show()
+
+# Create filename from params
+param_str = '_'.join(f'{k}={v}' for k, v in params.items())
+filename = f'a.pkl'
+# Result: 'model_lr=0.001_batch_size=32_epochs=100.pkl'
+
+# Save
+with open(filename, 'wb') as f:
+    pickle.dump(G_nx, f)
 
 

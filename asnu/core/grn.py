@@ -126,7 +126,7 @@ def establish_links(G, src_id, dst_id,
                     # Each community gets the node with probability 1/N, so expected
                     # total additions ≈ 1 (same as local mode)
                     for comm_id in range(G.number_of_communities):
-                        if random.uniform(0, 1) < ((1.0 / G.number_of_communities) * fraction):
+                        if random.uniform(0, 1) < ((1.0 / G.number_of_communities) * (fraction)):
                             global_key = (comm_id, dst_id)
                             if global_key in G.popularity_pool:
                                 G.popularity_pool[global_key].append(d_from_db)
