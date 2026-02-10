@@ -1,35 +1,32 @@
 # Imports
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
-import networkx as nx
 import rustworkx as rx
 import matplotlib.pyplot as plt
-from asnu import generate, NetworkXGraph
+from asnu import generate, create_communities
 import time
 import pickle
 from scipy import stats
 # Generate network
-pops = 'Data/tab_n_(with oplniv).csv'
+links = 'Data/tab_buren.csv'
 # as example we use group interaction data on a work / school layer
-links = 'Data/tab_werkschool.csv' 
+pops = 'Data/tab_n_(with oplniv).csv' 
 
 start = time.perf_counter()
-# Your code here
-params = {
-    'pops_path': pops, 
-    'links_path': links, 
-    'preferential_attachment':0,
-    'scale': 0.01,
-    'reciprocity':1,
-    'transitivity':0,
-    'number_of_communities':25,
-    'community_size_distribution':"powerlaw",
-    'pa_scope':"local",
-    'fill_unfulfilled' : True
-          }
+# # Step 1: Create communities separately
+create_communities(pops, links,
+                   scale=0.1, number_of_communities=2500,
+                   output_path='my_communities.json')
+
 graph = generate(
-    **params      # Path for the FileBasedGraph's data
+    pops,                             # The group-level population data
+    links,                            # The group-level interaction data
+    preferential_attachment=0,        # Preferential attachment strength
+    scale=0.1,                          # Population scaling
+    reciprocity=1,                    # Reciprocal edge probability
+    transitivity =1,
+    community_file='my_communities.json',                  # friend of a friend is my friend probability
+    base_path="my_network",           # Path for the FileBasedGraph's data
 )
 
 end = time.perf_counter()
@@ -53,7 +50,9 @@ print(f"Transitivity:{rx.transitivity(G_rx)}")
 
 # Get degree sequence
 degrees = [G_rx.in_degree(node) for node in G_rx.node_indices()]
-
+print(degrees.count(0))
+print(degrees.count(1))
+print(degrees.count(100))
 print(f"Mean degree: {np.mean(degrees):.2f}")
 print(f"Std degree: {np.std(degrees):.2f}")
 print(f"Max degree: {max(degrees)}")
@@ -64,7 +63,7 @@ print(f"fourth q degree: {np.quantile(degrees, 0.75)}")
 print(f"skew: {stats.skew(degrees)}")
 
 
-plt.hist(degrees)
+plt.hist(degrees, bins = 50)
 plt.show()
 
 # Create filename from params
