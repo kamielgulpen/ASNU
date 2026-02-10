@@ -7,7 +7,8 @@ import rustworkx as rx
 import matplotlib.pyplot as plt
 from asnu import generate, NetworkXGraph
 import time
-
+import pickle
+from scipy import stats
 # Generate network
 pops = 'Data/tab_n_(with oplniv).csv'
 # as example we use group interaction data on a work / school layer
@@ -15,17 +16,20 @@ links = 'Data/tab_werkschool.csv'
 
 start = time.perf_counter()
 # Your code here
-
+params = {
+    'pops_path': pops, 
+    'links_path': links, 
+    'preferential_attachment':0,
+    'scale': 0.01,
+    'reciprocity':1,
+    'transitivity':0,
+    'number_of_communities':25,
+    'community_size_distribution':"powerlaw",
+    'pa_scope':"local",
+    'fill_unfulfilled' : True
+          }
 graph = generate(
-    pops,                             # The group-level population data
-    links,                            # The group-level interaction data
-    preferential_attachment=0,     # Preferential attachment strength
-    scale=0.1,                       # Population scaling
-    reciprocity=0,                    # Reciprocal edge probability
-    transitivity =0,                 # friend of a friend is my friend probability
-    number_of_communities = 100,
-    pa_scope="global",
-    base_path="my_network",        # Path for the FileBasedGraph's data
+    **params      # Path for the FileBasedGraph's data
 )
 
 end = time.perf_counter()
@@ -57,8 +61,19 @@ print(f"Min degree: {min(degrees)}")
 print(f"Median degree: {np.median(degrees)}")
 print(f"first q degree: {np.quantile(degrees, 0.25)}")
 print(f"fourth q degree: {np.quantile(degrees, 0.75)}")
+print(f"skew: {stats.skew(degrees)}")
+
 
 plt.hist(degrees)
 plt.show()
+
+# Create filename from params
+param_str = '_'.join(f'{k}={v}' for k, v in params.items())
+filename = f'a.pkl'
+# Result: 'model_lr=0.001_batch_size=32_epochs=100.pkl'
+
+# Save
+with open(filename, 'wb') as f:
+    pickle.dump(G_nx, f)
 
 
