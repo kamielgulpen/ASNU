@@ -68,7 +68,7 @@ def _compute_maximum_num_links(G, links_path, scale, src_suffix='_src',
         print("Calculating link requirements...")
 
     group_ids = G.group_ids
-    G.maximum_num_links = {(i, j): 0 for i in group_ids for j in group_ids}
+    G.maximum_num_links = {(int(i), int(j)): 0 for i in group_ids for j in group_ids}
 
     # Build (key, original_value) pairs for stratified allocation
     items = []
@@ -110,12 +110,12 @@ def init_nodes(G, pops_path, scale=1, pop_column='n'):
     pop_column : str, optional
         Name of the column containing population counts (default 'n')
     """
+    print(G.group_to_attrs.keys())
     group_desc_dict, characteristic_cols = desc_groups(pops_path, pop_column=pop_column)
 
     # Build (key, original_value) pairs for stratified allocation
     items = [(gid, info[pop_column]) for gid, info in group_desc_dict.items()]
     node_allocations = stratified_allocate(items, scale)
-
     # Create nodes
     node_id = 0
     for group_id, group_info in group_desc_dict.items():
