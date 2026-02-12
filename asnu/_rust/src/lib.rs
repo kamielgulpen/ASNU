@@ -153,7 +153,7 @@ fn process_nodes<'py>(
 /// Processes all group pairs in one Rust call, maintaining the edge set
 /// and adjacency list internally. Returns all new edges and final link counts.
 #[pyfunction]
-#[pyo3(signature = (group_pairs, valid_communities_map, maximum_num_links, communities_to_nodes, nodes_to_group, fraction, reciprocity_p, transitivity_p, pa_scope, number_of_communities))]
+#[pyo3(signature = (group_pairs, valid_communities_map, maximum_num_links, communities_to_nodes, nodes_to_group, fraction, reciprocity_p, transitivity_p, pa_scope, number_of_communities, bridge_probability=0.0, pre_existing_edges=None))]
 fn run_edge_creation(
     // List of (src_id, dst_id, target_link_count) for each group pair
     group_pairs: Vec<(i64, i64, i64)>,
@@ -171,6 +171,9 @@ fn run_edge_creation(
     transitivity_p: f64,
     pa_scope: String,
     number_of_communities: i64,
+    bridge_probability: f64,
+    // Optional pre-existing edges (for multiplex pre-seeding)
+    pre_existing_edges: Option<Vec<(i64, i64)>>,
 ) -> PyResult<(Vec<(i64, i64)>, Vec<(i64, i64, i64)>)> {
     let mut rng = thread_rng();
 
@@ -186,6 +189,23 @@ fn run_edge_creation(
     let mut existing_num_links: HashMap<(i64, i64), i64> = HashMap::new();
     for &(src, dst) in maximum_num_links.keys() {
         existing_num_links.insert((src, dst), 0);
+    }
+
+    // Initialize internal state from pre-existing edges (multiplex pre-seeding)
+    if let Some(ref pre_edges) = pre_existing_edges {
+        for &(s, d) in pre_edges {
+            edges.insert((s, d));
+            adjacency.entry(s).or_default().push(d);
+            // Count toward link budget (do NOT add to new_edges — already in graph)
+            let s_group = *nodes_to_group.get(&s).unwrap_or(&-1);
+            let d_group = *nodes_to_group.get(&d).unwrap_or(&-1);
+            if s_group >= 0 && d_group >= 0 {
+                *existing_num_links.entry((s_group, d_group)).or_insert(0) += 1;
+            }
+        }
+        if !pre_edges.is_empty() {
+            println!("  Rust: initialized with {} pre-existing edges", pre_edges.len());
+        }
     }
 
     // Src node list cache per (community_id, group_id)
@@ -250,8 +270,19 @@ fn run_edge_creation(
                 continue;
             }
 
-            // Initialize popularity pool for (community, dst_group)
-            let pool_key = (community_id, dst_id);
+            // Decide: bridge edge (dst from neighboring community) or normal
+            let dst_community = if bridge_probability > 0.0
+                && number_of_communities > 1
+                && rng.gen::<f64>() < bridge_probability
+            {
+                let direction: i64 = if rng.gen::<bool>() { 1 } else { -1 };
+                ((community_id + direction).rem_euclid(number_of_communities)) as i64
+            } else {
+                community_id
+            };
+
+            // Initialize popularity pool for (dst_community, dst_group)
+            let pool_key = (dst_community, dst_id);
             if !popularity_pool.contains_key(&pool_key) {
                 let dst_nodes = communities_to_nodes
                     .get(&pool_key)

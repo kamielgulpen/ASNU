@@ -89,7 +89,7 @@ class NetworkXGraph:
         # Keyed by (community_id, group_id) -> list of nodes (with duplicates for weighting)
         self.popularity_pool = {}
 
-        self._load_metadata()
+        # self._load_metadata()
 
     def _save_metadata(self):
         """Save generation metadata to JSON."""
@@ -283,7 +283,7 @@ class NetworkXGraph:
 
         Call this after generation is complete to persist the network.
         """
-        self._save_metadata()
+        # self._save_metadata()
         try:
             nx.write_gpickle(self.graph, self.graph_file)
         except:

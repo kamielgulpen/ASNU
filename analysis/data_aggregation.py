@@ -5,7 +5,7 @@ from itertools import combinations
 # Read data
 df = pd.read_csv('Data/tab_n_(with oplniv).csv')
 
-characteristics = ["geslacht", "lft", "etngrp", "oplniv"]
+characteristics = sorted(["geslacht", "lft", "etngrp", "oplniv"])
 
 # Loop through all possible subset sizes
 for r in range(1, len(characteristics) + 1):

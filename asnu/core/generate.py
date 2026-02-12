@@ -168,7 +168,8 @@ def _setup_no_community_structure(G):
 
 
 def _run_edge_creation_python(G, links_path, fraction, reciprocity_p, transitivity_p,
-                              verbose, src_suffix, dst_suffix, pa_scope):
+                              verbose, src_suffix, dst_suffix, pa_scope,
+                              bridge_probability=0):
     """Pure-Python fallback for edge creation."""
     warnings = []
     df_n_group_links = read_file(links_path)
@@ -195,7 +196,9 @@ def _run_edge_creation_python(G, links_path, fraction, reciprocity_p, transitivi
 
         link_success = establish_links(G, src_id, dst_id,
                                        num_requested_links, fraction, reciprocity_p,
-                                       transitivity_p, valid_communities, pa_scope)
+                                       transitivity_p, valid_communities, pa_scope,
+                                       bridge_probability=bridge_probability,
+                                       number_of_communities=G.number_of_communities)
 
         if not link_success:
             existing_links = G.existing_num_links[(src_id, dst_id)]
@@ -212,7 +215,8 @@ def _run_edge_creation_python(G, links_path, fraction, reciprocity_p, transitivi
 
 
 def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
-                       verbose, src_suffix, dst_suffix, pa_scope):
+                       verbose, src_suffix, dst_suffix, pa_scope,
+                       bridge_probability=0):
     """
     Run the edge creation loop using the community structure already set on G.
     Tries Rust backend, falls back to Python.
@@ -221,7 +225,8 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
         from asnu_rust import run_edge_creation as rust_edge_creation
     except ImportError:
         _run_edge_creation_python(G, links_path, fraction, reciprocity_p,
-                                  transitivity_p, verbose, src_suffix, dst_suffix, pa_scope)
+                                  transitivity_p, verbose, src_suffix, dst_suffix, pa_scope,
+                                  bridge_probability=bridge_probability)
         return
 
     if verbose:
@@ -254,6 +259,7 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
         group_pairs, vcm, mnl, ctn, ntg,
         fraction, reciprocity_p, transitivity_p,
         pa_scope, G.number_of_communities,
+        bridge_probability,
     )
 
     # Apply edges to the NetworkX graph
@@ -269,7 +275,7 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
              transitivity, base_path="graph_data", verbose=True,
              pop_column='n', src_suffix='_src', dst_suffix='_dst', link_column='n',
              fill_unfulfilled=True, fully_connect_communities=False,
-             pa_scope='local', community_file=None):
+             pa_scope='local', community_file=None, bridge_probability=0):
     """
     Generate a population-based network using NetworkX.
 
@@ -320,6 +326,10 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
         Path to a JSON file with pre-computed community assignments (default None).
         Created by create_communities(). If not provided, the network is generated
         without any community structure.
+    bridge_probability : float, optional
+        Probability of routing an edge to a neighboring community (±1, circular
+        wrapping). Creates wide bridges between adjacent communities, modeling
+        people participating in multiple foci. Default 0 (no bridging).
 
     Returns
     -------
@@ -373,7 +383,8 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
                 print("\nStep 2b: Creating edges using community structure...")
             _run_edge_creation(G, links_path, preferential_attachment_fraction,
                                reciprocity, transitivity, verbose,
-                               src_suffix, dst_suffix, pa_scope)
+                               src_suffix, dst_suffix, pa_scope,
+                               bridge_probability=bridge_probability)
 
             if fill_unfulfilled:
                 if verbose:
@@ -390,7 +401,8 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
 
         _run_edge_creation(G, links_path, preferential_attachment_fraction,
                            reciprocity, transitivity, verbose,
-                           src_suffix, dst_suffix, pa_scope)
+                           src_suffix, dst_suffix, pa_scope,
+                           bridge_probability=bridge_probability)
 
         if fill_unfulfilled:
             if verbose:
