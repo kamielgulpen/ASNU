@@ -28,6 +28,8 @@ import numpy as np
 def build_group_pair_to_communities_lookup(G, verbose=False):
     """
     Create a lookup dictionary mapping each group pair to their shared communities.
+    The algorithm will also resamble the structure when some groups are more representative
+    in communities than others.
 
     This precomputes which communities contain which group pairs, making link
     creation much faster by avoiding repeated community membership checks.
@@ -66,6 +68,59 @@ def build_group_pair_to_communities_lookup(G, verbose=False):
         print(f"  Average communities per pair: {avg_communities:.1f}")
 
     return group_pair_to_communities
+
+
+def _process_nodes_python(G, all_nodes, node_groups, community_composition,
+                          community_sizes, group_exposure, ideal,
+                          target_counts, total_nodes):
+    """Pure-Python fallback for the node assignment loop."""
+    for node_idx in range(len(all_nodes)):
+        node = all_nodes[node_idx]
+        group = node_groups[node_idx]
+
+        current_exp = group_exposure[group, :]
+
+        hypothetical_exp = current_exp + community_composition
+        hypothetical_totals = hypothetical_exp.sum(axis=1, keepdims=True)
+        hypothetical_totals = np.maximum(hypothetical_totals, 1e-10)
+        hypothetical_dist = hypothetical_exp / hypothetical_totals
+
+        diff = hypothetical_dist - ideal[group, :]
+        distances = np.sqrt((diff ** 2).sum(axis=1))
+
+        if target_counts is not None:
+            full_mask = community_sizes >= target_counts
+            distances[full_mask] = np.inf
+
+        temperature = 1.0 - (node_idx / total_nodes)
+        if temperature > 0.05:
+            valid_mask = distances < np.inf
+            if valid_mask.sum() > 1:
+                d = distances[valid_mask]
+                scaled = -d / (temperature + 1e-10)
+                scaled = scaled - scaled.max()
+                probs = np.exp(scaled)
+                probs = probs / probs.sum()
+                valid_indices = np.where(valid_mask)[0]
+                best_community = np.random.choice(valid_indices, p=probs)
+            else:
+                best_community = np.argmin(distances)
+        else:
+            best_community = np.argmin(distances)
+
+        G.communities_to_nodes[(best_community, group)].append(node)
+        G.nodes_to_communities[node] = best_community
+        G.communities_to_groups[best_community].append(group)
+
+        group_exposure[group, :] += community_composition[best_community, :]
+        mask = community_composition[best_community, :] > 0
+        group_exposure[mask, group] += 1
+
+        community_composition[best_community, group] += 1
+        community_sizes[best_community] += 1
+
+        if (node_idx + 1) % 500 == 0:
+            print(f"Assigned {node_idx + 1}/{total_nodes} nodes ({100*(node_idx+1)/total_nodes:.1f}%)")
 
 
 def populate_communities(G, num_communities, community_size_distribution='natural'):
@@ -153,70 +208,33 @@ def populate_communities(G, num_communities, community_size_distribution='natura
     np.random.shuffle(all_nodes)
     node_groups = np.array([G.nodes_to_group[n] for n in all_nodes])
 
-    # Process nodes
-    for node_idx in range(len(all_nodes)):
-        node = all_nodes[node_idx]
-        group = node_groups[node_idx]
+    # Process nodes — try Rust, fall back to Python
 
-        # Current group exposure (shape: n_groups)
-        current_exp = group_exposure[group, :]
 
-        # Vectorized: hypothetical exposure for ALL communities at once
-        # Each row is: current_exp + community_composition[c, :]
-        hypothetical_exp = current_exp + community_composition  # (num_communities, n_groups)
-        hypothetical_totals = hypothetical_exp.sum(axis=1, keepdims=True)  # (num_communities, 1)
-
-        # Normalize to get distributions (handle zero totals)
-        hypothetical_totals = np.maximum(hypothetical_totals, 1e-10)
-        hypothetical_dist = hypothetical_exp / hypothetical_totals  # (num_communities, n_groups)
-
-        # Vectorized distance calculation: L2 distance from ideal[group, :]
-        diff = hypothetical_dist - ideal[group, :]  # (num_communities, n_groups)
-        distances = np.sqrt((diff ** 2).sum(axis=1))  # (num_communities,)
-
-        # Apply size constraints by setting full communities to inf distance
-        if target_sizes is not None:
-            full_mask = community_sizes >= target_counts
-            distances[full_mask] = np.inf
-
-        # Simulated annealing: high temp early (random), low temp late (greedy)
-        temperature = 1.0 - (node_idx / total_nodes)
-        if temperature > 0.05:
-            # Softmax selection: lower distance = higher probability
-            valid_mask = distances < np.inf
-            if valid_mask.sum() > 1:
-                d = distances[valid_mask]
-                scaled = -d / (temperature + 1e-10)
-                scaled = scaled - scaled.max()  # numerical stability
-                probs = np.exp(scaled)
-                probs = probs / probs.sum()
-                valid_indices = np.where(valid_mask)[0]
-                best_community = np.random.choice(valid_indices, p=probs)
-            else:
-                best_community = np.argmin(distances)
-        else:
-            best_community = np.argmin(distances)
-
-        # Update data structures
-        G.communities_to_nodes[(best_community, group)].append(node)
-        G.nodes_to_communities[node] = best_community
-        G.communities_to_groups[best_community].append(group)
-
-        # Update group exposure: node gains exposure to groups in this community
-        group_exposure[group, :] += community_composition[best_community, :]
-
-        # Update exposure for groups already in this community (they gain exposure to this group)
-        # Vectorized: add 1 to exposure[other_groups, group] for all groups in community
-        mask = community_composition[best_community, :] > 0
-        group_exposure[mask, group] += 1
-
-        # Update community composition
-        community_composition[best_community, group] += 1
-        community_sizes[best_community] += 1
-
-        # Progress reporting
-        if (node_idx + 1) % 500 == 0:
-            print(f"Assigned {node_idx + 1}/{total_nodes} nodes ({100*(node_idx+1)/total_nodes:.1f}%)")
+    try:
+        from asnu_rust import process_nodes
+        print("Using Rust backend for node processing...")
+        assignments = process_nodes(
+            all_nodes.astype(np.int64), node_groups.astype(np.int64),
+            community_composition, community_sizes,
+            group_exposure, ideal,
+            target_counts if target_sizes is not None else None,
+            total_nodes,
+        )
+        for i in range(len(all_nodes)):
+            node = int(all_nodes[i])
+            comm = int(assignments[i])
+            group = int(node_groups[i])
+            G.communities_to_nodes[(comm, group)].append(node)
+            G.nodes_to_communities[node] = comm
+            G.communities_to_groups[comm].append(group)
+    except ImportError:
+        _process_nodes_python(
+            G, all_nodes, node_groups, community_composition,
+            community_sizes, group_exposure, ideal,
+            target_counts if target_sizes is not None else None,
+            total_nodes,
+        )
 
     print(f"\nCommunity population complete: {len(all_nodes)} nodes assigned")
     # === DIAGNOSTIC 1: Community Size Distribution ===
@@ -555,9 +573,109 @@ def create_communities(pops_path, links_path, scale, number_of_communities,
     return output_path
 
 
+def create_hierarchical_community_file(
+    household_community_file,
+    pops_path,
+    links_path,
+    scale,
+    target_num_communities,
+    output_path,
+    pop_column='n',
+    src_suffix='_src',
+    dst_suffix='_dst',
+    link_column='n',
+    verbose=True,
+):
+    """
+    Create a community file where household communities are grouped into
+    super-communities (e.g. 5000 household communities → 5 buren communities).
+
+    Nodes in the same household community are guaranteed to be in the same
+    super-community. Uses block assignment for locality preservation.
+
+    Parameters
+    ----------
+    household_community_file : str
+        Path to the household community JSON (from create_communities())
+    pops_path : str
+        Path to population CSV (for computing probability matrix)
+    links_path : str
+        Path to interaction CSV for the target layer
+    scale : float
+        Population scaling factor
+    target_num_communities : int
+        Number of super-communities to create
+    output_path : str
+        Path to write the output JSON
+    """
+    import json
+    import math
+    from asnu.core.graph import NetworkXGraph
+    from asnu.core.generate import init_nodes, _compute_maximum_num_links
+
+    # Load household community assignments
+    with open(household_community_file, 'r', encoding='utf-8') as f:
+        hh_data = json.load(f)
+
+    hh_num_communities = hh_data['number_of_communities']
+    hh_nodes_to_communities = {int(k): v for k, v in hh_data['nodes_to_communities'].items()}
+
+    # Block assignment: group household communities into super-communities
+    block_size = math.ceil(hh_num_communities / target_num_communities)
+
+    super_nodes_to_communities = {}
+    for node, hh_comm in hh_nodes_to_communities.items():
+        super_comm = min(hh_comm // block_size, target_num_communities - 1)
+        super_nodes_to_communities[node] = super_comm
+
+    # Compute probability matrix from this layer's own link data
+    G_temp = NetworkXGraph('_temp_hierarchical')
+    init_nodes(G_temp, pops_path, scale, pop_column=pop_column)
+    _compute_maximum_num_links(G_temp, links_path, scale,
+                               src_suffix=src_suffix, dst_suffix=dst_suffix,
+                               link_column=link_column, verbose=False)
+
+    n_groups = len(G_temp.group_ids)
+    affinity = np.zeros((n_groups, n_groups))
+    for (i, j), count in G_temp.maximum_num_links.items():
+        affinity[i, j] = count
+    row_sums = affinity.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1e-10
+    probability_matrix = affinity / row_sums
+
+    # Clean up temp directory
+    import shutil, os
+    if os.path.exists('_temp_hierarchical'):
+        shutil.rmtree('_temp_hierarchical')
+
+    # Write community JSON
+    data = {
+        'number_of_communities': target_num_communities,
+        'probability_matrix': probability_matrix.tolist(),
+        'nodes_to_communities': {str(k): int(v) for k, v in super_nodes_to_communities.items()},
+        'communities_to_nodes': {},
+        'communities_to_groups': {},
+    }
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f)
+
+    if verbose:
+        print(f"  Hierarchical communities: {hh_num_communities} household → "
+              f"{target_num_communities} super-communities (block_size={block_size})")
+        print(f"  Saved to {output_path}")
+
+    return output_path
+
+
 def load_communities(G, community_file_path):
     """
     Load community assignments from a JSON file into a NetworkXGraph object.
+
+    Node-to-community assignments are loaded from the file, but
+    communities_to_nodes and communities_to_groups are recalculated from
+    the actual graph nodes. This ensures correctness when the graph has
+    fewer groups than when the community file was created.
 
     Parameters
     ----------
@@ -565,13 +683,7 @@ def load_communities(G, community_file_path):
         Graph object with nodes already initialized
     community_file_path : str
         Path to the JSON file created by create_communities()
-
-    Raises
-    ------
-    ValueError
-        If node IDs in the file don't match the nodes in G
     """
-    import ast
     import json
 
     with open(community_file_path, 'r', encoding='utf-8') as f:
@@ -580,25 +692,34 @@ def load_communities(G, community_file_path):
     G.number_of_communities = data['number_of_communities']
     G.probability_matrix = np.array(data['probability_matrix'])
 
-    G.nodes_to_communities = {
-        int(k): v for k, v in data['nodes_to_communities'].items()
-    }
-    G.communities_to_nodes = {
-        ast.literal_eval(k): v for k, v in data['communities_to_nodes'].items()
-    }
-    G.communities_to_groups = {
-        int(k): v for k, v in data['communities_to_groups'].items()
-    }
-
-    # Validate that all graph nodes have a community assignment
+    # Load node-to-community assignments, keeping only nodes present in graph
     graph_nodes = set(G.graph.nodes)
-    community_nodes = set(G.nodes_to_communities.keys())
-    if graph_nodes != community_nodes:
-        missing = graph_nodes - community_nodes
-        extra = community_nodes - graph_nodes
-        msg = "Community file does not match current graph nodes."
-        if missing:
-            msg += f" {len(missing)} graph nodes missing from community file."
-        if extra:
-            msg += f" {len(extra)} community file nodes not in graph."
-        raise ValueError(msg)
+
+    G.nodes_to_communities = {}
+    for k, v in data['nodes_to_communities'].items():
+        node = int(k)
+        if node in graph_nodes:
+            G.nodes_to_communities[node] = v
+
+    unassigned = graph_nodes - set(G.nodes_to_communities.keys())
+    if unassigned:
+        print(f"Warning: {len(unassigned)} graph nodes have no community assignment")
+
+    # Recalculate communities_to_nodes and communities_to_groups
+    # from the actual graph nodes, so they reflect current groups
+    communities_groups = {}
+
+    for node, community_id in G.nodes_to_communities.items():
+        group_id = G.nodes_to_group[node]
+        key = (community_id, group_id)
+        if key not in G.communities_to_nodes:
+            G.communities_to_nodes[key] = []
+        G.communities_to_nodes[key].append(node)
+
+        if community_id not in communities_groups:
+            communities_groups[community_id] = set()
+        communities_groups[community_id].add(group_id)
+
+    G.communities_to_groups = {
+        comm: list(groups) for comm, groups in communities_groups.items()
+    }

@@ -95,7 +95,7 @@ def desc_groups(pops_path, pop_column = 'n'):
     df_group_pops = read_file(pops_path)
 
     # Identify characteristic columns (all except pop_column)
-    characteristic_cols = [col for col in df_group_pops.columns if col != pop_column]
+    characteristic_cols = [col for col in sorted(df_group_pops.columns) if col != pop_column]
 
     # Each group gets a unique ID (row number)
     group_populations = {
