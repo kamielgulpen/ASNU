@@ -4,7 +4,8 @@ import random
 
 def establish_links(G, src_id, dst_id,
                   target_link_count, fraction, reciprocity_p, transitivity_p,
-                  valid_communities=None, pa_scope="local"):
+                  valid_communities=None, pa_scope="local",
+                  bridge_probability=0, number_of_communities=1):
     """
     Create edges between source and destination nodes with preferential attachment.
 
@@ -34,6 +35,12 @@ def establish_links(G, src_id, dst_id,
         Scope of preferential attachment popularity:
         - "local": popularity stays within the community (default)
         - "global": popularity spreads to all communities
+    bridge_probability : float, optional
+        Probability of routing an edge to a neighboring community (±1,
+        circular wrapping). Creates wide bridges between adjacent
+        communities. Default 0 (no bridging).
+    number_of_communities : int, optional
+        Total number of communities (needed for circular wrapping).
 
     Returns
     -------
@@ -82,10 +89,18 @@ def establish_links(G, src_id, dst_id,
             # Get source nodes in this community
             src_node_lists[community_id] = G.communities_to_nodes[(community_id, src_id)]
 
+        # Decide: bridge edge (dst from neighboring community) or normal edge
+        if (bridge_probability > 0 and number_of_communities > 1
+                and random.random() < bridge_probability):
+            direction = random.choice([-1, 1])
+            dst_community = (community_id + direction) % number_of_communities
+        else:
+            dst_community = community_id
+
         # Initialize global popularity pool for this community-group pair if needed
-        pool_key = (community_id, dst_id)
+        pool_key = (dst_community, dst_id)
         if pool_key not in G.popularity_pool:
-            dst_community_nodes = G.communities_to_nodes[(community_id, dst_id)]
+            dst_community_nodes = G.communities_to_nodes.get((dst_community, dst_id), [])
             if dst_community_nodes:
                 sample_size = math.ceil(len(dst_community_nodes) * fraction)
                 G.popularity_pool[pool_key] = list(np.random.choice(dst_community_nodes,
