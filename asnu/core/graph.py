@@ -89,7 +89,7 @@ class NetworkXGraph:
         # Keyed by (community_id, group_id) -> list of nodes (with duplicates for weighting)
         self.popularity_pool = {}
 
-        self._load_metadata()
+        # self._load_metadata()
 
     def _save_metadata(self):
         """Save generation metadata to JSON."""

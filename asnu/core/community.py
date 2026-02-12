@@ -93,7 +93,7 @@ def populate_communities(G, num_communities, community_size_distribution='natura
         Controls community size distribution
     """
     total_nodes = len(list(G.graph.nodes))
-    n_groups = len(G.group_ids)
+    n_groups = int(len(G.group_ids))
 
     # Create affinity matrix from link counts
     affinity = np.zeros((n_groups, n_groups))
