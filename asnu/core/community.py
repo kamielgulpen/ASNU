@@ -573,6 +573,101 @@ def create_communities(pops_path, links_path, scale, number_of_communities,
     return output_path
 
 
+def create_hierarchical_community_file(
+    household_community_file,
+    pops_path,
+    links_path,
+    scale,
+    target_num_communities,
+    output_path,
+    pop_column='n',
+    src_suffix='_src',
+    dst_suffix='_dst',
+    link_column='n',
+    verbose=True,
+):
+    """
+    Create a community file where household communities are grouped into
+    super-communities (e.g. 5000 household communities → 5 buren communities).
+
+    Nodes in the same household community are guaranteed to be in the same
+    super-community. Uses block assignment for locality preservation.
+
+    Parameters
+    ----------
+    household_community_file : str
+        Path to the household community JSON (from create_communities())
+    pops_path : str
+        Path to population CSV (for computing probability matrix)
+    links_path : str
+        Path to interaction CSV for the target layer
+    scale : float
+        Population scaling factor
+    target_num_communities : int
+        Number of super-communities to create
+    output_path : str
+        Path to write the output JSON
+    """
+    import json
+    import math
+    from asnu.core.graph import NetworkXGraph
+    from asnu.core.generate import init_nodes, _compute_maximum_num_links
+
+    # Load household community assignments
+    with open(household_community_file, 'r', encoding='utf-8') as f:
+        hh_data = json.load(f)
+
+    hh_num_communities = hh_data['number_of_communities']
+    hh_nodes_to_communities = {int(k): v for k, v in hh_data['nodes_to_communities'].items()}
+
+    # Block assignment: group household communities into super-communities
+    block_size = math.ceil(hh_num_communities / target_num_communities)
+
+    super_nodes_to_communities = {}
+    for node, hh_comm in hh_nodes_to_communities.items():
+        super_comm = min(hh_comm // block_size, target_num_communities - 1)
+        super_nodes_to_communities[node] = super_comm
+
+    # Compute probability matrix from this layer's own link data
+    G_temp = NetworkXGraph('_temp_hierarchical')
+    init_nodes(G_temp, pops_path, scale, pop_column=pop_column)
+    _compute_maximum_num_links(G_temp, links_path, scale,
+                               src_suffix=src_suffix, dst_suffix=dst_suffix,
+                               link_column=link_column, verbose=False)
+
+    n_groups = len(G_temp.group_ids)
+    affinity = np.zeros((n_groups, n_groups))
+    for (i, j), count in G_temp.maximum_num_links.items():
+        affinity[i, j] = count
+    row_sums = affinity.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1e-10
+    probability_matrix = affinity / row_sums
+
+    # Clean up temp directory
+    import shutil, os
+    if os.path.exists('_temp_hierarchical'):
+        shutil.rmtree('_temp_hierarchical')
+
+    # Write community JSON
+    data = {
+        'number_of_communities': target_num_communities,
+        'probability_matrix': probability_matrix.tolist(),
+        'nodes_to_communities': {str(k): int(v) for k, v in super_nodes_to_communities.items()},
+        'communities_to_nodes': {},
+        'communities_to_groups': {},
+    }
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f)
+
+    if verbose:
+        print(f"  Hierarchical communities: {hh_num_communities} household → "
+              f"{target_num_communities} super-communities (block_size={block_size})")
+        print(f"  Saved to {output_path}")
+
+    return output_path
+
+
 def load_communities(G, community_file_path):
     """
     Load community assignments from a JSON file into a NetworkXGraph object.
