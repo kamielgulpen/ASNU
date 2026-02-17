@@ -19,6 +19,7 @@ import math
 from pathlib import Path
 from scipy import stats as sp_stats
 from itertools import combinations
+import scipy
 
 from contagion_experiment import (
     ContagionSimulator, load_networks, assign_colors,
@@ -153,16 +154,24 @@ def sweep_combined(networks, thresholds=np.linspace(0.05, 0.5, 15),
 # Plotting
 # ---------------------------------------------------------------------------
 
+def mean_confidence_interval(data, confidence=0.95):
+    a = 1.0 * np.array(data)
+    n = len(a)
+    m, se = np.mean(data), scipy.stats.sem(a)
+    h = se * scipy.stats.t.ppf((1 + confidence) / 2., n-1)
+    return m, m-h, m+h
+
 def plot_uncontested(thresholds, results):
     fig, ax = plt.subplots(figsize=(10, 6))
     colors = assign_colors(list(results.keys()))
 
     for name, finals in results.items():
         mean = finals.mean(axis=1)
+        # print(finals)
         std = finals.std(axis=1)
         ax.plot(thresholds, mean, 'o-', label=name, color=colors[name], linewidth=2)
-        ax.fill_between(thresholds, mean - std, mean + std,
-                        alpha=0.15, color=colors[name])
+        # ax.fill_between(thresholds, mean - std, mean + std,
+        #                 alpha=0.15, color=colors[name])
 
     ax.set_xlabel('Absolute Threshold (τ)', fontsize=12)
     ax.set_ylabel('Final Cascade Size (%)', fontsize=12)
@@ -183,8 +192,8 @@ def plot_contested(fractions, results):
         mean = finals.mean(axis=1)
         std = finals.std(axis=1)
         ax.plot(fractions, mean, '-', label=name, color=colors[name], linewidth=2)
-        ax.fill_between(fractions, mean - std, mean + std,
-                        alpha=0.15, color=colors[name])
+        # ax.fill_between(fractions, mean - std, mean + std,
+        #                 alpha=0.15, color=colors[name])
 
     ax.set_xlabel('Fractional Threshold (τ)', fontsize=12)
     ax.set_ylabel('Final Cascade Size (%)', fontsize=12)
@@ -567,7 +576,7 @@ def _run_sweep_on_folder(network_folder, n_simulations=20):
     }
 
 
-def main(network_folder='Data/networks/multiplex_scale=0.01',
+def main(network_folder='Data/networks/scale=0.01_comms=1_recip=1_trans=0_pa=0',
          n_simulations=20):
     """
     Run parameter sweeps on networks in a folder.
