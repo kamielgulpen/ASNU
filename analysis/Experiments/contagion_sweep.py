@@ -13,12 +13,14 @@ Seeding follows Centola:
 """
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import math
 from pathlib import Path
 from scipy import stats as sp_stats
 from itertools import combinations
+from scipy.cluster.hierarchy import dendrogram, linkage
 
 from contagion_experiment import (
     ContagionSimulator, load_networks, assign_colors,
@@ -27,6 +29,247 @@ from contagion_experiment import (
 
 sns.set_style("whitegrid")
 np.random.seed(42)
+
+
+def analyze_group_differences(thresholds, seeds, all_results, out_dir):
+    """
+    Analyze differences between network groups across parameter space
+    
+    Parameters:
+    -----------
+    networks : dict of network names
+    thresholds : array of threshold values
+    seeds : array of seed fractions
+    all_results : dict with network names as keys, 2D arrays as values
+    """
+    
+    # 1. Restructure data for analysis
+    print("="*60)
+    print("GROUP COMPARISON ANALYSIS")
+    print("="*60)
+    
+    rows = []
+    for net_name, results in all_results.items():
+        for i, threshold in enumerate(thresholds):
+            for j, seed in enumerate(seeds):
+                rows.append({
+                    'network': net_name,
+                    'threshold': threshold,
+                    'seed': seed,
+                    'outcome': results[i, j]
+                })
+    
+    df = pd.DataFrame(rows)
+    
+    # 2. Overall group statistics
+    print("\n[1] OVERALL STATISTICS BY NETWORK:")
+    print("-" * 60)
+    group_stats = df.groupby('network')['outcome'].agg([
+        'mean', 'std', 'min', 'max', 
+        ('q25', lambda x: x.quantile(0.25)),
+        ('q75', lambda x: x.quantile(0.75))
+    ]).round(4)
+    print(group_stats)
+    
+    # 3. Statistical tests for differences
+    print("\n[2] STATISTICAL SIGNIFICANCE TESTS:")
+    print("-" * 60)
+    
+    # ANOVA: Are there ANY differences between groups?
+    groups_data = [group['outcome'].values for name, group in df.groupby('network')]
+    f_stat, p_value = sp_stats.f_oneway(*groups_data)
+    print(f"ANOVA F-statistic: {f_stat:.4f}")
+    print(f"ANOVA p-value: {p_value:.4e}")
+    if p_value < 0.001:
+        print("*** Highly significant differences between groups (p < 0.001)")
+    elif p_value < 0.05:
+        print("** Significant differences between groups (p < 0.05)")
+    else:
+        print("No significant differences between groups (p >= 0.05)")
+    
+    # Pairwise comparisons
+    print("\n[3] PAIRWISE COMPARISONS (t-tests with Bonferroni correction):")
+    print("-" * 60)
+    network_names = list(all_results.keys())
+    n_comparisons = len(network_names) * (len(network_names) - 1) / 2
+    bonferroni_alpha = 0.05 / n_comparisons
+    
+    pairwise_results = []
+    for i, net1 in enumerate(network_names):
+        for net2 in network_names[i+1:]:
+            data1 = df[df['network'] == net1]['outcome']
+            data2 = df[df['network'] == net2]['outcome']
+            t_stat, p_val = sp_stats.ttest_ind(data1, data2)
+            effect_size = (data1.mean() - data2.mean()) / np.sqrt((data1.std()**2 + data2.std()**2) / 2)
+            
+            pairwise_results.append({
+                'comparison': f"{net1} vs {net2}",
+                't_statistic': t_stat,
+                'p_value': p_val,
+                'significant': p_val < bonferroni_alpha,
+                'effect_size': effect_size,
+                'mean_diff': data1.mean() - data2.mean()
+            })
+    
+    pairwise_df = pd.DataFrame(pairwise_results).sort_values('p_value')
+    print(pairwise_df.to_string(index=False))
+    
+    # 4. Where in parameter space do differences occur?
+    print("\n[4] PARAMETER SPACE REGIONS WITH LARGEST DIFFERENCES:")
+    print("-" * 60)
+    
+    # Calculate variance across networks at each parameter combination
+    variance_map = np.zeros((len(thresholds), len(seeds)))
+    for i, threshold in enumerate(thresholds):
+        for j, seed in enumerate(seeds):
+            subset = df[(np.isclose(df['threshold'], threshold, atol=0.01)) & 
+                       (np.isclose(df['seed'], seed, atol=0.01))]
+            variance_map[i, j] = subset.groupby('network')['outcome'].mean().std()
+    
+    # Find top regions with highest variance
+    top_variance_idx = np.argsort(variance_map.ravel())[-5:]
+    print("Top 5 parameter combinations with highest between-group variance:")
+    for idx in top_variance_idx[::-1]:
+        i, j = np.unravel_index(idx, variance_map.shape)
+        print(f"  threshold={thresholds[i]:.3f}, seed={seeds[j]:.3f}, std={variance_map[i,j]:.4f}")
+    
+    # 5. Similarity analysis
+    print("\n[5] NETWORK SIMILARITY ANALYSIS:")
+    print("-" * 60)
+    
+    # Create matrix of mean outcomes for each network
+    network_profiles = np.array([all_results[name].flatten() for name in network_names])
+    
+    # Correlation between networks
+    corr_matrix = np.corrcoef(network_profiles)
+    print("\nCorrelation matrix (how similar are response patterns?):")
+    corr_df = pd.DataFrame(corr_matrix, index=network_names, columns=network_names)
+    print(corr_df.round(3))
+    
+    # 6. Create visualizations
+    fig = plt.figure(figsize=(20, 12))
+    
+    # 6a. Heatmaps for each network
+    n_networks = len(network_names)
+    n_cols = min(3, n_networks)
+    n_rows = (n_networks + n_cols - 1) // n_cols
+    
+    X, Y = np.meshgrid(seeds, thresholds)
+    vmin = min(results.min() for results in all_results.values())
+    vmax = max(results.max() for results in all_results.values())
+    
+    for idx, (name, results) in enumerate(all_results.items()):
+        ax = plt.subplot(n_rows + 2, n_cols, idx + 1)
+        im = ax.contourf(X, Y, results, levels=15, cmap='viridis', vmin=vmin, vmax=vmax)
+        ax.set_title(f'{name}\n(mean={results.mean():.3f})', fontsize=10)
+        ax.set_xlabel('Seed Fraction')
+        ax.set_ylabel('Threshold')
+        if idx == len(all_results) - 1:
+            plt.colorbar(im, ax=ax)
+    
+    # 6b. Variance map
+    ax_var = plt.subplot(n_rows + 2, n_cols, n_networks + 1)
+    im_var = ax_var.contourf(X, Y, variance_map, levels=15, cmap='Reds')
+    ax_var.set_title('Between-Group Variance\n(where groups differ most)', fontsize=10)
+    ax_var.set_xlabel('Seed Fraction')
+    ax_var.set_ylabel('Threshold')
+    plt.colorbar(im_var, ax=ax_var)
+    
+    # 6c. Mean across all networks
+    ax_mean = plt.subplot(n_rows + 2, n_cols, n_networks + 2)
+    mean_results = np.mean(list(all_results.values()), axis=0)
+    im_mean = ax_mean.contourf(X, Y, mean_results, levels=15, cmap='viridis')
+    ax_mean.set_title('Mean Across All Networks', fontsize=10)
+    ax_mean.set_xlabel('Seed Fraction')
+    ax_mean.set_ylabel('Threshold')
+    plt.colorbar(im_mean, ax=ax_mean)
+    
+    # 6d. Cross-sections at high-variance point
+    max_var_idx = np.unravel_index(np.argmax(variance_map), variance_map.shape)
+    high_var_threshold = thresholds[max_var_idx[0]]
+    high_var_seed = seeds[max_var_idx[1]]
+    
+    ax_cross = plt.subplot(n_rows + 2, n_cols, n_networks + 3)
+    for name, results in all_results.items():
+        # Fix threshold, vary seed
+        threshold_idx = np.argmin(np.abs(thresholds - high_var_threshold))
+        ax_cross.plot(seeds, results[threshold_idx, :], marker='o', label=name, linewidth=2)
+    ax_cross.set_xlabel('Seed Fraction')
+    ax_cross.set_ylabel('Outcome')
+    ax_cross.set_title(f'Cross-section at threshold={high_var_threshold:.3f}\n(high variance region)', fontsize=10)
+    ax_cross.legend()
+    ax_cross.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(out_dir / 'group_comparison.png', dpi=300, bbox_inches='tight')
+    print(f"\nSaved: {out_dir / 'group_comparison.png'}")
+    
+    # 7. Hierarchical clustering
+    fig_cluster, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Dendrogram
+    linkage_matrix = linkage(network_profiles, method='ward')
+    dendrogram(linkage_matrix, labels=network_names, ax=ax1)
+    ax1.set_title('Network Clustering\n(similar response patterns)', fontsize=12)
+    ax1.set_ylabel('Distance')
+    
+    # Correlation heatmap
+    sns.heatmap(corr_df, annot=True, fmt='.2f', cmap='coolwarm', 
+                center=0, ax=ax2, cbar_kws={'label': 'Correlation'})
+    ax2.set_title('Response Pattern Correlation', fontsize=12)
+    
+    plt.tight_layout()
+    plt.savefig(out_dir / 'network_similarity.png', dpi=300, bbox_inches='tight')
+    print(f"Saved: {out_dir / 'network_similarity.png'}")
+    
+    # 8. Summary box plots
+    fig_box, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # Overall distributions
+    df.boxplot(column='outcome', by='network', ax=axes[0])
+    axes[0].set_title('Overall Outcome Distribution by Network')
+    axes[0].set_xlabel('Network')
+    axes[0].set_ylabel('Outcome')
+    plt.sca(axes[0])
+    plt.xticks(rotation=45, ha='right')
+    
+    # At low seed
+    low_seed = seeds[len(seeds)//4]
+    df_low_seed = df[np.isclose(df['seed'], low_seed, atol=0.01)]
+    df_low_seed.boxplot(column='outcome', by='network', ax=axes[1])
+    axes[1].set_title(f'At Low Seed ({low_seed:.3f})')
+    axes[1].set_xlabel('Network')
+    axes[1].set_ylabel('Outcome')
+    plt.sca(axes[1])
+    plt.xticks(rotation=45, ha='right')
+    
+    # At high seed
+    high_seed = seeds[3*len(seeds)//4]
+    df_high_seed = df[np.isclose(df['seed'], high_seed, atol=0.01)]
+    df_high_seed.boxplot(column='outcome', by='network', ax=axes[2])
+    axes[2].set_title(f'At High Seed ({high_seed:.3f})')
+    axes[2].set_xlabel('Network')
+    axes[2].set_ylabel('Outcome')
+    plt.sca(axes[2])
+    plt.xticks(rotation=45, ha='right')
+    
+    plt.suptitle('')  # Remove automatic title
+    plt.tight_layout()
+    plt.savefig(out_dir / 'boxplot_comparison.png', dpi=300, bbox_inches='tight')
+    print(f"Saved: {out_dir / 'boxplot_comparison.png'}")
+    
+    # 9. Export detailed results
+    df.to_csv(out_dir / 'detailed_group_results.csv', index=False)
+    pairwise_df.to_csv(out_dir / 'pairwise_tests.csv', index=False)
+    
+    return {
+        'dataframe': df,
+        'group_stats': group_stats,
+        'anova': {'f_stat': f_stat, 'p_value': p_value},
+        'pairwise': pairwise_df,
+        'correlation': corr_df,
+        'variance_map': variance_map
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +404,8 @@ def plot_uncontested(thresholds, results):
         mean = finals.mean(axis=1)
         std = finals.std(axis=1)
         ax.plot(thresholds, mean, 'o-', label=name, color=colors[name], linewidth=2)
-        ax.fill_between(thresholds, mean - std, mean + std,
-                        alpha=0.15, color=colors[name])
+        # ax.fill_between(thresholds, mean - std, mean + std,
+        #                 alpha=0.15, color=colors[name])
 
     ax.set_xlabel('Absolute Threshold (τ)', fontsize=12)
     ax.set_ylabel('Final Cascade Size (%)', fontsize=12)
@@ -183,8 +426,8 @@ def plot_contested(fractions, results):
         mean = finals.mean(axis=1)
         std = finals.std(axis=1)
         ax.plot(fractions, mean, '-', label=name, color=colors[name], linewidth=2)
-        ax.fill_between(fractions, mean - std, mean + std,
-                        alpha=0.15, color=colors[name])
+        # ax.fill_between(fractions, mean - std, mean + std,
+        #                 alpha=0.15, color=colors[name])
 
     ax.set_xlabel('Fractional Threshold (τ)', fontsize=12)
     ax.set_ylabel('Final Cascade Size (%)', fontsize=12)
@@ -558,7 +801,7 @@ def _run_sweep_on_folder(network_folder, n_simulations=20):
     fig4 = plot_combined(combined_thresholds, combined_seeds, combined_results)
     fig4.savefig(out_dir / 'sweep_combined.png', dpi=300, bbox_inches='tight')
     print(f"  Saved: {out_dir / 'sweep_combined.png'}")
-
+    analyze_group_differences(combined_thresholds,combined_seeds,combined_results,out_dir)
     return {
         'uncontested': (abs_thresholds, uncontested_results, unc_stats),
         'contested': (frac_thresholds, contested_results, con_stats),
@@ -567,7 +810,7 @@ def _run_sweep_on_folder(network_folder, n_simulations=20):
     }
 
 
-def main(network_folder='Data/networks/multiplex_scale=0.01',
+def main(network_folder='Data/networks/werkschool/scale=0.01_comms=1_recip=1_trans=0_pa=0_bridge=0',
          n_simulations=20):
     """
     Run parameter sweeps on networks in a folder.
