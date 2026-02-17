@@ -14,7 +14,9 @@ from pathlib import Path
 import seaborn as sns
 import pickle
 from scipy import sparse
+from scipy.stats import entropy
 import math
+import pandas as pd
 
 sns.set_style("whitegrid")
 np.random.seed(42)
@@ -69,8 +71,8 @@ class ContagionSimulator:
             totals = np.sum(state, axis=0)
             time_series.append(totals.copy())
 
-            if np.all(totals == self.n) or np.all(totals == prev_totals):
-                break
+            # if np.all(totals == self.n) or np.all(totals == prev_totals):
+            #     break
 
         # Convert to list-of-lists format
         return [[int(time_series[t][sim]) for t in range(len(time_series))]
@@ -130,8 +132,8 @@ class ContagionSimulator:
             totals = np.sum(state, axis=0)
             time_series.append(totals.copy())
 
-            if np.all(totals == self.n) or np.all(totals == prev_totals):
-                break
+            # if np.all(totals == self.n) or np.all(totals == prev_totals):
+            #     break
 
         return [[int(time_series[t][sim]) for t in range(len(time_series))]
                 for sim in range(n_simulations)]
@@ -182,8 +184,8 @@ class ContagionSimulator:
             totals = np.sum(state, axis=0)
             time_series.append(totals.copy())
 
-            if np.all(totals == self.n) or np.all(totals == prev_totals):
-                break
+            # if np.all(totals == self.n) or np.all(totals == prev_totals):
+            #     break
 
         return [[int(time_series[t][sim]) for t in range(len(time_series))]
                 for sim in range(n_simulations)]
@@ -298,7 +300,8 @@ def run_experiment(networks, n_simulations=50):
 
     print("Running simulations...")
 
-    for name, G in networks.items():
+    for name, G in networks.items():        
+ 
         print(f"  Processing {name} network...")
         sim = ContagionSimulator(G, name)
 
@@ -361,9 +364,8 @@ def plot_results(results, networks):
     ax = axes[0, 1]
     for name in results['complex'].keys():
         time_series_list = results['complex'][name]
-        print(time_series_list)
         max_len = max(len(ts) for ts in time_series_list)
-        print(max_len)
+
         padded = []
         for ts in time_series_list:
             padded_ts = ts + [ts[-1]] * (max_len - len(ts))
@@ -392,16 +394,60 @@ def plot_results(results, networks):
         final_rates[contagion_type] = {}
         for name in results[contagion_type].keys():
             finals = [ts[-1] / n * 100 for ts in results[contagion_type][name]]
-            final_rates[contagion_type][name] = (np.mean(finals), np.std(finals))
+            final_rates[contagion_type][name] = (np.mean(finals), np.std(finals), np.var(finals))
+    # 2. Gini Coefficient (0=equal, 1=concentrated)
+    def gini_coefficient(x):
+        sorted_x = np.sort(x)
+        n = len(x)
+        cumsum = np.cumsum(sorted_x)
+        return (2 * np.sum((n - np.arange(1, n+1) + 1) * sorted_x)) / (n * cumsum[-1]) - (n + 1) / n
+
     
     x = np.arange(len(networks))
     width = 0.35
-    
+    biggest_group_rations = []
+    for name in networks.keys():
+        if name.startswith("Random"):
+            biggest_group_rations.append(0)
+            continue
+
+        # Method 1: Normalize by product of group sizes (expected links under random mixing)
+        df = pd.read_csv(f"Data/aggregated/tab_werkschool_{name}.csv")
+        df_n = pd.read_csv(f"Data/aggregated/tab_n_{name}.csv")
+   
+        ratio = df_n.n.max()/df_n.n.sum()
+        entropy_vals = entropy(df.n)
+        gini = gini_coefficient(df.n.values)
+        # 3. Herfindahl-Hirschman Index (0=distributed, 1=monopoly)
+        proportions = df.n / df.n.sum()
+        hhi = np.sum(proportions ** 2)
+
+        biggest_group_rations.append(ratio)
+
+
     simple_means = [final_rates['simple'][name][0] for name in networks.keys()]
     simple_stds = [final_rates['simple'][name][1] for name in networks.keys()]
     complex_means = [final_rates['complex'][name][0] for name in networks.keys()]
     complex_stds = [final_rates['complex'][name][1] for name in networks.keys()]
+    complex_vars = [final_rates['complex'][name][2] for name in networks.keys()]
     
+    # Plot 1: Network names on x-axis
+    plt.figure(figsize=(10, 6))
+    x_indices = range(len(networks.keys()))  # Create numeric indices for the names
+    plt.scatter(biggest_group_rations, complex_vars)
+    plt.xticks(biggest_group_rations, list(networks.keys()), rotation=90)  # Set labels to network names
+    plt.xlabel('Network Names')
+    plt.ylabel('Variance')
+    plt.tight_layout()  # Prevents labels from being cut off
+    plt.show()
+
+    # Plot 2: Numeric values on x-axis
+    plt.figure(figsize=(10, 6))
+    plt.scatter(biggest_group_rations, complex_vars)
+    plt.xlabel('Biggest Group Ratios')
+    plt.ylabel('Variance')
+    plt.tight_layout()
+    plt.show()
     ax.bar(x - width/2, simple_means, width, label='Simple', 
            yerr=simple_stds, capsize=5, color='#3498db', alpha=0.8)
     ax.bar(x + width/2, complex_means, width, label='Complex', 
@@ -540,14 +586,14 @@ def _run_experiment_on_folder(network_folder, multiplex=False):
         return None, None, None
 
     # Print properties
-    print_network_properties(networks)
+    # print_network_properties(networks)
 
     # Save degree distributions
     print("Saving degree distributions...")
-    plot_degree_distributions(networks, node_dist_dir)
+    # plot_degree_distributions(networks, node_dist_dir)
 
     # Run simulations
-    results = run_experiment(networks, n_simulations=20)
+    results = run_experiment(networks, n_simulations=50)
 
     # Analyze results
     print("="*70)
@@ -577,8 +623,7 @@ def _run_experiment_on_folder(network_folder, multiplex=False):
 
     return networks, results, fig
 
-
-def main(network_folder='Data/networks/multiplex_scale=0.01'):
+def main(network_folder='Data/networks/werkschool/scale=0.01_comms=1_recip=1_trans=0_pa=0_bridge=0'):
     """
     Run the complete experiment on networks in a folder.
 
@@ -591,7 +636,7 @@ def main(network_folder='Data/networks/multiplex_scale=0.01'):
     print("="*70)
 
     folder = Path(network_folder)
-
+    print(folder)
     # Check if this folder has .pkl files directly or subfolders
     pkl_files = list(folder.glob('*.pkl'))
     subfolders = sorted([d for d in folder.iterdir() if d.is_dir()
@@ -609,7 +654,7 @@ def main(network_folder='Data/networks/multiplex_scale=0.01'):
             print(f"\n{'='*70}")
             print(f"CHARACTERISTIC GROUP: {subfolder.name}")
             print(f"{'='*70}")
-            networks, results, fig = _run_experiment_on_folder(subfolder, multiplex = True)
+            networks, results, fig = _run_experiment_on_folder(subfolder, multiplex = False)
             if networks is not None:
                 all_results[subfolder.name] = (networks, results, fig)
         return all_results
