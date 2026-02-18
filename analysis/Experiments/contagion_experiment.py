@@ -80,7 +80,12 @@ class ContagionSimulator:
 
     def _seed_state(self, state, n_simulations, seeding, initial_infected):
         """Initialize infection state based on seeding strategy."""
-        if seeding == 'focal_neighbors':
+        
+        if type(seeding) == type(np.array([1,2])):
+            for sim in range(n_simulations):
+                nodes = np.random.choice(seeding, initial_infected, replace=False)
+                state[nodes, sim] = 1.0
+        elif seeding == 'focal_neighbors':
             for sim in range(n_simulations):
                 focal = np.random.randint(self.n)
                 state[focal, sim] = 1.0
@@ -225,12 +230,18 @@ def load_networks(folder, add_random=True, multiplex = False):
         with open(pkl_file, 'rb') as f:
             obj = pickle.load(f)
         # Skip non-graph objects (e.g. multiplex.pkl is a dict of layers)
+
         if not isinstance(obj, nx.Graph):
-            print(f"  Skipped {name} (not a graph)")
-            continue
-        networks[name] = obj
-        print(f"  Loaded {name} ({networks[name].number_of_nodes()} nodes, "
-              f"{networks[name].number_of_edges()} edges)")
+            if not isinstance(obj.graph, nx.Graph):
+                print(f"  Skipped {name} (not a graph)")
+                continue
+            networks[name] = obj
+            print(f"  Loaded {name} ({networks[name].graph.number_of_nodes()} nodes, "
+            f"{networks[name].graph.number_of_edges()} edges)")
+        else: 
+            networks[name] = obj
+            print(f"    Loaded {name} ({networks[name].number_of_nodes()} nodes, "
+                f"{networks[name].number_of_edges()} edges)")
 
     if add_random and networks:
         ref = next(iter(networks.values()))
@@ -312,7 +323,7 @@ def run_experiment(networks, n_simulations=50):
         # Complex contagion — all simulations in one batched call
         results['complex'][name] = sim.complex_contagion(
             threshold=0.25, threshold_type='fraction', initial_infected=800,
-            n_simulations=n_simulations)
+            n_simulations=n_simulations, seeding = np.array([i for i in range(1000)]))
 
     print("Simulations complete!\n")
     return results
@@ -623,7 +634,7 @@ def _run_experiment_on_folder(network_folder, multiplex=False):
 
     return networks, results, fig
 
-def main(network_folder='Data/networks/werkschool/scale=0.01_comms=1_recip=1_trans=0_pa=0_bridge=0'):
+def main(network_folder='Data/networks/werkschool/scale=0.01_comms=1.0_recip=1_trans=0_pa=0.0_bridge=0'):
     """
     Run the complete experiment on networks in a folder.
 
