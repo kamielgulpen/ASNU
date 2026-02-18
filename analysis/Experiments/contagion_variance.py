@@ -44,7 +44,7 @@ def sweep_contested(networks, fractions=None, n_simulations=20, max_steps=50):
                 seeding='focal_neighbors',
                 max_steps=max_steps, 
                 n_simulations=n_simulations,
-                initial_infected=n/10)
+                initial_infected=n/30)
             # finals[i] = np.array([ts[-1] / n * 100 for ts in ts_list])
             finals[i] = np.median([i[-1] for i in ts_list])
         results[name] = finals
@@ -101,7 +101,8 @@ def main(network_folder='Data/networks/werkschool/scale=0.01_comms=1_recip=1_tra
     print(indexes)
     for number_of_communities in n_c:
         for preferential_attachment in p_a:
-            number_of_communities, preferential_attachment = 100.0, preferential_attachment
+            print(number_of_communities, preferential_attachment)
+            # number_of_communities, preferential_attachment = number_of_communities, preferential_attachment
             i+=1 
             
             keys.append((number_of_communities, preferential_attachment))
