@@ -345,13 +345,15 @@ fn run_edge_creation(
                             }
                         }
                     } else {
-                        if let Some(p) = popularity_pool.get_mut(&pool_key) {
-                            p.push(d);
-                            // Also add a random node from the full dst community
-                            if let Some(dst_community_nodes) = communities_to_nodes.get(&pool_key) {
-                                if !dst_community_nodes.is_empty() {
-                                    let dst_random_community_node = dst_community_nodes[rng.gen_range(0..dst_community_nodes.len())];
-                                    p.push(dst_random_community_node);
+                        if rng.gen::<f64>() > fraction {
+                            if let Some(p) = popularity_pool.get_mut(&pool_key) {
+                                p.push(d);
+                                // Also add a random node from the full dst community
+                                if let Some(dst_community_nodes) = communities_to_nodes.get(&pool_key) {
+                                    if !dst_community_nodes.is_empty() {
+                                        let dst_random_community_node = dst_community_nodes[rng.gen_range(0..dst_community_nodes.len())];
+                                        p.push(dst_random_community_node);
+                                    }
                                 }
                             }
                         }
