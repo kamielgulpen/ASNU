@@ -347,6 +347,13 @@ fn run_edge_creation(
                     } else {
                         if let Some(p) = popularity_pool.get_mut(&pool_key) {
                             p.push(d);
+                            // Also add a random node from the full dst community
+                            if let Some(dst_community_nodes) = communities_to_nodes.get(&pool_key) {
+                                if !dst_community_nodes.is_empty() {
+                                    let dst_random_community_node = dst_community_nodes[rng.gen_range(0..dst_community_nodes.len())];
+                                    p.push(dst_random_community_node);
+                                }
+                            }
                         }
                     }
                 }
@@ -420,10 +427,248 @@ fn run_edge_creation(
 }
 
 
+/// Capacity-based community assignment.
+///
+/// Same SA temperature schedule as `process_nodes`, but evaluates communities
+/// by checking whether fully connecting a new node stays within the
+/// `maximum_num_links` budget (absolute edge counts, not probabilities).
+///
+/// Optimized: flat 2D arrays, only evaluates active (non-empty) communities.
+#[pyfunction]
+#[pyo3(signature = (all_nodes, node_groups, budget, n_groups, initial_num_communities, target_counts=None, total_nodes=0))]
+fn process_nodes_capacity<'py>(
+    py: Python<'py>,
+    all_nodes: PyReadonlyArray1<'py, i64>,
+    node_groups: PyReadonlyArray1<'py, i64>,
+    budget: HashMap<(i64, i64), i64>,
+    n_groups: usize,
+    initial_num_communities: usize,
+    target_counts: Option<PyReadonlyArray1<'py, i32>>,
+    total_nodes: usize,
+) -> PyResult<Bound<'py, PyArray1<i64>>> {
+    let _all_nodes = all_nodes.as_array();
+    let node_groups = node_groups.as_array();
+    let tc: Option<Array1<i32>> = target_counts.map(|t| t.as_array().to_owned());
+
+    let mut rng = thread_rng();
+    let mut assignments: Vec<i64> = Vec::with_capacity(total_nodes);
+
+    // Pre-allocate with some extra room for growth
+    let max_communities = initial_num_communities + initial_num_communities / 4;
+
+    // Flat 2D array for community composition: comp[c * n_groups + h] = count
+    let mut comp: Vec<i64> = vec![0; max_communities * n_groups];
+    let mut community_sizes: Vec<i64> = vec![0; max_communities];
+    let mut num_active: usize = 0; // Only iterate up to this index
+    let mut capacity: usize = max_communities;
+
+    // Flat 2D array for accumulated edge counts: acc[g * n_groups + h]
+    let mut acc: Vec<i64> = vec![0; n_groups * n_groups];
+
+    // Target matrix as flat array for cache-friendly access
+    let mut target: Vec<i64> = vec![0; n_groups * n_groups];
+    for (&(sg, dg), &count) in budget.iter() {
+        let sg_u = sg as usize;
+        let dg_u = dg as usize;
+        if sg_u < n_groups && dg_u < n_groups {
+            target[sg_u * n_groups + dg_u] = count;
+        }
+    }
+
+    // Pre-cache target rows/cols for the current group (updated per node)
+    let mut target_row_g: Vec<i64> = vec![0; n_groups]; // target[g, :]
+    let mut target_col_g: Vec<i64> = vec![0; n_groups]; // target[:, g]
+    let mut acc_row_g: Vec<i64> = vec![0; n_groups];    // acc[g, :]
+    let mut acc_col_g: Vec<i64> = vec![0; n_groups];    // acc[:, g]
+
+    // Reusable buffers
+    let mut distances: Vec<f64> = vec![0.0; max_communities];
+
+    for node_idx in 0..total_nodes {
+        let g = node_groups[node_idx] as usize;
+
+        // Cache target and accumulated rows/cols for group g
+        for h in 0..n_groups {
+            target_row_g[h] = target[g * n_groups + h];
+            target_col_g[h] = target[h * n_groups + g];
+            acc_row_g[h] = acc[g * n_groups + h];
+            acc_col_g[h] = acc[h * n_groups + g];
+        }
+
+        // Evaluate only active (non-empty) communities
+        let mut best_community: Option<usize> = None;
+        let eval_count = num_active;
+
+        for c_idx in 0..eval_count {
+            let c_offset = c_idx * n_groups;
+            let mut feasible = true;
+            let mut dist_sq: f64 = 0.0;
+
+            for h in 0..n_groups {
+                let count_h = comp[c_offset + h];
+                if count_h == 0 {
+                    // No members of this group in community — distance from target unchanged
+                    let rem_gh = (target_row_g[h] - acc_row_g[h]) as f64;
+                    dist_sq += rem_gh * rem_gh;
+                    let rem_hg = (target_col_g[h] - acc_col_g[h]) as f64;
+                    dist_sq += rem_hg * rem_hg;
+                    continue;
+                }
+
+                if h != g {
+                    // Outgoing g->h: cost = count_h
+                    let hyp_gh = acc_row_g[h] + count_h;
+                    if hyp_gh > target_row_g[h] {
+                        feasible = false;
+                        break;
+                    }
+                    let rem = (target_row_g[h] - hyp_gh) as f64;
+                    dist_sq += rem * rem;
+
+                    // Incoming h->g: cost = count_h
+                    let hyp_hg = acc_col_g[h] + count_h;
+                    if hyp_hg > target_col_g[h] {
+                        feasible = false;
+                        break;
+                    }
+                    let rem = (target_col_g[h] - hyp_hg) as f64;
+                    dist_sq += rem * rem;
+                } else {
+                    // Self-group g->g: cost = 2 * count_g
+                    let hyp_gg = acc_row_g[g] + 2 * count_h;
+                    if hyp_gg > target_row_g[g] {
+                        feasible = false;
+                        break;
+                    }
+                    let rem = (target_row_g[g] - hyp_gg) as f64;
+                    dist_sq += rem * rem;
+                    // Note: for self-group, row and col are the same pair, already counted
+                }
+            }
+
+            if !feasible {
+                distances[c_idx] = f64::INFINITY;
+                continue;
+            }
+
+            // Optional size limit
+            if let Some(ref tc) = tc {
+                if c_idx < tc.len() && community_sizes[c_idx] as i32 >= tc[c_idx] {
+                    distances[c_idx] = f64::INFINITY;
+                    continue;
+                }
+            }
+
+            distances[c_idx] = dist_sq.sqrt();
+        }
+
+        // Temperature-based selection (same SA as process_nodes)
+        let temperature: f64 = 1.0 - (node_idx as f64 / total_nodes as f64);
+
+        if temperature > 0.05 && eval_count > 0 {
+            let valid: Vec<usize> = (0..eval_count)
+                .filter(|&c| distances[c].is_finite())
+                .collect();
+
+            if valid.len() > 1 {
+                let max_neg_d = valid
+                    .iter()
+                    .map(|&c| -distances[c] / (temperature + 1e-10))
+                    .fold(f64::NEG_INFINITY, f64::max);
+
+                let weights: Vec<f64> = valid
+                    .iter()
+                    .map(|&c| ((-distances[c] / (temperature + 1e-10)) - max_neg_d).exp())
+                    .collect();
+
+                let dist = WeightedIndex::new(&weights).unwrap();
+                best_community = Some(valid[dist.sample(&mut rng)]);
+            } else if valid.len() == 1 {
+                best_community = Some(valid[0]);
+            }
+        } else if eval_count > 0 {
+            // Greedy: pick minimum distance
+            let min_idx = (0..eval_count)
+                .filter(|&c| distances[c].is_finite())
+                .min_by(|&a, &b| distances[a].partial_cmp(&distances[b]).unwrap());
+            if let Some(idx) = min_idx {
+                best_community = Some(idx);
+            }
+        }
+
+        // If no feasible community, create a new one at num_active
+        let chosen = match best_community {
+            Some(c) => c,
+            None => {
+                let new_idx = num_active;
+                // Grow arrays if needed
+                if new_idx >= capacity {
+                    let new_cap = capacity + capacity / 2 + 1;
+                    comp.resize(new_cap * n_groups, 0);
+                    community_sizes.resize(new_cap, 0);
+                    distances.resize(new_cap, 0.0);
+                    capacity = new_cap;
+                }
+                num_active += 1;
+                new_idx
+            }
+        };
+
+        // If chosen == num_active (first node going into this slot), bump num_active
+        if chosen >= num_active {
+            num_active = chosen + 1;
+        }
+
+        // Update accumulated edge counts
+        {
+            let c_offset = chosen * n_groups;
+            for h in 0..n_groups {
+                let count_h = comp[c_offset + h];
+                if count_h == 0 {
+                    continue;
+                }
+                if h != g {
+                    acc[g * n_groups + h] += count_h;
+                    acc[h * n_groups + g] += count_h;
+                } else {
+                    acc[g * n_groups + g] += 2 * count_h;
+                }
+            }
+        }
+
+        // Add node to community
+        comp[chosen * n_groups + g] += 1;
+        community_sizes[chosen] += 1;
+        assignments.push(chosen as i64);
+
+        if (node_idx + 1) % 5000 == 0 {
+            let pct = 100.0 * (node_idx + 1) as f64 / total_nodes as f64;
+            println!(
+                "Capacity assignment: {}/{} nodes ({:.1}%), {} active communities",
+                node_idx + 1,
+                total_nodes,
+                pct,
+                num_active
+            );
+        }
+    }
+
+    println!(
+        "Capacity-based assignment complete: {} nodes -> {} active communities",
+        total_nodes,
+        num_active
+    );
+
+    let result = Array1::from(assignments);
+    Ok(PyArray1::from_owned_array_bound(py, result))
+}
+
+
 /// Python module
 #[pymodule]
 fn asnu_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_nodes, m)?)?;
     m.add_function(wrap_pyfunction!(run_edge_creation, m)?)?;
+    m.add_function(wrap_pyfunction!(process_nodes_capacity, m)?)?;
     Ok(())
 }
