@@ -37,6 +37,7 @@ dependencies = [
     "maturin>=1.11.5",
     "tqdm>=4.67.3",
     "nbconvert>=7.16.6",
+    "filelock>=3.16.1",
 ]
 
 [project.optional-dependencies]
