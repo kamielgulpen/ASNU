@@ -8,7 +8,7 @@ import time
 import pickle
 from scipy import stats
 # Generate network
-links = 'Data/tab_buren.csv'
+links = 'Data/tab_huishouden.csv'
 # as example we use group interaction data on a work / school layer
 pops = 'Data/tab_n_(with oplniv).csv' 
 
@@ -17,21 +17,23 @@ start = time.perf_counter()
 create_communities(
     pops, 
     links,
-    scale=1, 
-    number_of_communities=480,
-    output_path='my_communities.json'
+    scale=0.01, 
+    number_of_communities=5000,
+    output_path='my_communities.json',
+    mode='probability'
 )
 
 graph = generate(
     pops,                             # The group-level population data
     links,                            # The group-level interaction data
     preferential_attachment=0,     # Preferential attachment strength
-    scale=1,                        # Population scaling
+    scale=0.01,                        # Population scaling
     reciprocity=1,                    # Reciprocal edge probability
-    transitivity =0,                  # Friend of a friend is my friend probability
+    transitivity =1,                  # Friend of a friend is my friend probability
     community_file='my_communities.json',                  
     base_path="my_network",           # Path for the FileBasedGraph's data
-    bridge_probability=0.2
+    bridge_probability=0,
+    fully_connect_communities = True
 )
 
 end = time.perf_counter()

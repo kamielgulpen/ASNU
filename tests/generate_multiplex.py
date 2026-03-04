@@ -3,18 +3,21 @@ Multiplex Network Generator
 ============================
 
 Generates a 4-layer multiplex network where every node exists in all layers.
-Layers are generated in order with optional hierarchical edge propagation.
+Household communities are hierarchically nested inside larger super-communities,
+and household edges are pre-seeded into dependent layers (counting toward their
+edge budget).
 
 Layers:
-  1. huishouden  (household)
-  2. familie     (family)
-  3. buren       (neighbours)
-  4. werkschool  (work/school)
+  1. huishouden  (household)  — generated normally with create_communities()
+  2. familie     (family)     — hierarchical communities from household,
+                                pre-seeded with a fraction of household edges
+  3. buren       (neighbours) — hierarchical communities from household,
+                                pre-seeded with ALL household edges
+  4. werkschool  (work/school) — generated independently
 
-Propagation rules (optional):
-  - All huishouden edges are copied to the buren layer
-  - A fraction of huishouden edges are copied to the familie layer
-  - werkschool is independent (no propagation)
+Pre-seeding ensures household edges count toward the layer's link budget
+(no inflation), and nodes in the same household community share the same
+super-community in buren/familie layers.
 """
 
 import networkx as nx
@@ -22,10 +25,9 @@ import numpy as np
 import pickle
 import time
 import os
-import random
 from itertools import combinations
 import igraph as ig
-from asnu import generate, create_communities
+from asnu import generate, create_communities, create_hierarchical_community_file
 
 
 # ============================================================================
@@ -77,16 +79,16 @@ LAYER_PARAMS = {
 scale = 0.01
 characteristics = sorted(["geslacht", "lft", "etngrp", "oplniv"])
 
-# Propagation settings
-propagate = True
-family_fraction = 0.3  # fraction of household edges that also become family edges
+# Hierarchical pre-seeding settings
+family_fraction = 0.3  # fraction of household edges pre-seeded into familie
 
 
 # ============================================================================
 # Core functions
 # ============================================================================
 
-def generate_layer(layer_name, pops_path, links_path, layer_params, scale):
+def generate_layer(layer_name, pops_path, links_path, layer_params, scale,
+                   community_file=None, pre_seed_edges=None):
     """
     Generate a single network layer using ASNU.
 
@@ -102,20 +104,27 @@ def generate_layer(layer_name, pops_path, links_path, layer_params, scale):
         Per-layer generation parameters
     scale : float
         Population scaling factor
+    community_file : str, optional
+        Path to pre-built community JSON. If None, creates one with
+        create_communities().
+    pre_seed_edges : list of (int, int), optional
+        Edges to pre-seed into the graph (counted toward link budget).
 
     Returns
     -------
     nx.DiGraph
         The generated network layer
     """
-    community_file = f'communities_{layer_name}.json'
-
-    create_communities(
-        pops_path, links_path,
-        scale=scale,
-        number_of_communities=layer_params['number_of_communities'],
-        output_path=community_file,
-    )
+    # Create community file if not provided (normal layers)
+    if community_file is None:
+        community_file = f'communities_{layer_name}.json'
+        create_communities(
+            pops_path, links_path,
+            scale=scale,
+            number_of_communities=layer_params['number_of_communities'],
+            output_path=community_file,
+            mode="capacity"
+        )
 
     graph = generate(
         pops_path,
@@ -124,73 +133,32 @@ def generate_layer(layer_name, pops_path, links_path, layer_params, scale):
         scale=scale,
         reciprocity=layer_params['reciprocity'],
         transitivity=layer_params['transitivity'],
-        fill_unfulfilled = layer_params['fill_unfulfilled'],
-        fully_connect_communities= layer_params['fully_connect_communities'],
+        fill_unfulfilled=layer_params['fill_unfulfilled'],
+        fully_connect_communities=layer_params['fully_connect_communities'],
         community_file=community_file,
-        base_path=f'temp_{layer_name}', 
+        base_path=f'temp_{layer_name}',
         bridge_probability=layer_params['bridge_probability'],
+        pre_seed_edges=pre_seed_edges,
     )
 
-    print(f"{'='*70}")
-    print(f"  {'Layer':<15} {'Nodes':>8} {'Edges':>10} {'Reciprocity':>13} {'Avg Degree':>12} {'Transitivity':>11}")
-    print(f"  {'-'*60}")
-
     combined = graph.graph
-    edges = list(combined.edges())
     nodes = list(combined.nodes())
+    edges = list(combined.edges())
     n = len(nodes)
     e = len(edges)
     avg_deg = e / n if n > 0 else 0
 
-    # Reciprocity
     recip_edges = sum(1 for u, v in combined.edges() if combined.has_edge(v, u))
     reciprocity = recip_edges / e if e > 0 else 0
 
-    edges = list(combined.edges())
-    nodes = list(combined.nodes())
     node_mapping = {node: idx for idx, node in enumerate(nodes)}
     igraph_edges = [(node_mapping[u], node_mapping[v]) for u, v in edges]
-
-    g = ig.Graph(n=len(nodes), edges=igraph_edges, directed=True)
-
+    g = ig.Graph(n=n, edges=igraph_edges, directed=True)
     transitivity_ig = g.transitivity_undirected(mode="nan")
 
-    print(f"  {"multiplex":<15} {n:>8} {e:>10} {reciprocity:>13.3f} {avg_deg:>12.1f} {transitivity_ig:>11.3f} ")
-
+    print(f"  {layer_name:<15} {n:>8} {e:>10} {reciprocity:>13.3f} {avg_deg:>12.1f} {transitivity_ig:>11.3f}")
 
     return graph.graph
-
-
-def propagate_edges_to(source_graph, target_graph, fraction=1.0):
-    """
-    Copy edges from source_graph into target_graph.
-
-    Parameters
-    ----------
-    source_graph : nx.DiGraph
-        Graph whose edges to propagate
-    target_graph : nx.DiGraph
-        Graph to add edges into
-    fraction : float
-        Fraction of source edges to propagate (1.0 = all)
-
-    Returns
-    -------
-    int
-        Number of new edges added
-    """
-    source_edges = list(source_graph.edges())
-    random.shuffle(source_edges)
-
-    n_to_propagate = int(len(source_edges) * fraction)
-    propagated = 0
-
-    for u, v in source_edges[:n_to_propagate]:
-        if not target_graph.has_edge(u, v):
-            target_graph.add_edge(u, v)
-            propagated += 1
-
-    return propagated
 
 
 def save_multiplex(layers, output_dir):
@@ -302,13 +270,11 @@ def print_layer_stats(layers):
 
 def main():
     print("\n" + "="*70)
-    print("MULTIPLEX NETWORK GENERATION")
+    print("MULTIPLEX NETWORK GENERATION (hierarchical pre-seeding)")
     print("="*70)
     print(f"\nLayers: {', '.join(LAYERS)}")
     print(f"Scale: {scale}")
-    print(f"Propagation: {'enabled' if propagate else 'disabled'}")
-    if propagate:
-        print(f"  Family fraction: {family_fraction}")
+    print(f"Family fraction: {family_fraction}")
     print()
 
     params_str = f"multiplex_scale={scale}"
@@ -323,42 +289,100 @@ def main():
             print(f"\n{'='*60}")
             print(f"Generating multiplex: {characteristics_string}")
             print(f"{'='*60}")
+            print(f"  {'Layer':<15} {'Nodes':>8} {'Edges':>10} {'Reciprocity':>13} {'Avg Degree':>12} {'Transitivity':>11}")
+            print(f"  {'-'*70}")
 
             layers = {}
             total_start = time.perf_counter()
 
-            def _generate_and_log(layer_name):
-                links = f'Data/aggregated/tab_{layer_name}_{characteristics_string}.csv'
-                print(f"\n  --- Layer: {layer_name} ---")
-                start = time.perf_counter()
-                graph = generate_layer(layer_name, pops, links,
-                                       LAYER_PARAMS[layer_name], scale)
-                elapsed = time.perf_counter() - start
-                print(f"  {layer_name}: {graph.number_of_nodes()} nodes, "
-                      f"{graph.number_of_edges()} edges ({elapsed:.2f}s)")
-                return graph
+            # Paths
+            hh_community_file = f'communities_huishouden_{characteristics_string}.json'
 
-            # 1. Generate huishouden first — all other layers build on it
-            layers['huishouden'] = _generate_and_log('huishouden')
+            # ── 1. huishouden: create communities normally, generate ──
+            print(f"\n  --- Layer: huishouden ---")
+            start = time.perf_counter()
+            hh_links = f'Data/aggregated/tab_huishouden_{characteristics_string}.csv'
 
-            # 2. Generate familie, then propagate household ties into it
-            layers['familie'] = _generate_and_log('familie')
-            if propagate:
-                n_fam = propagate_edges_to(layers['huishouden'], layers['familie'],
-                                           fraction=family_fraction)
-                print(f"    + propagated {n_fam} household edges into familie "
-                      f"({family_fraction:.0%} of {layers['huishouden'].number_of_edges()})")
+            create_communities(
+                pops, hh_links,
+                scale=scale,
+                number_of_communities=LAYER_PARAMS['huishouden']['number_of_communities'],
+                output_path=hh_community_file,
+            )
 
-            # 3. Generate buren, then propagate ALL household ties into it
-            layers['buren'] = _generate_and_log('buren')
-            if propagate:
-                n_bur = propagate_edges_to(layers['huishouden'], layers['buren'],
-                                           fraction=1.0)
-                print(f"    + propagated {n_bur} household edges into buren "
-                      f"(all {layers['huishouden'].number_of_edges()})")
+            layers['huishouden'] = generate_layer(
+                'huishouden', pops, hh_links,
+                LAYER_PARAMS['huishouden'], scale,
+                community_file=hh_community_file,
+            )
+            print(f"  huishouden: {layers['huishouden'].number_of_nodes()} nodes, "
+                  f"{layers['huishouden'].number_of_edges()} edges ({time.perf_counter() - start:.2f}s)")
 
-            # 4. Generate werkschool independently
-            layers['werkschool'] = _generate_and_log('werkschool')
+            hh_edges = list(layers['huishouden'].edges())
+
+            # ── 2. familie: hierarchical communities from household, ──
+            #       pre-seed family_fraction of household edges
+            print(f"\n  --- Layer: familie (hierarchical, pre-seed {family_fraction:.0%} of hh edges) ---")
+            start = time.perf_counter()
+            fam_links = f'Data/aggregated/tab_familie_{characteristics_string}.csv'
+            fam_community_file = f'communities_familie_{characteristics_string}.json'
+
+            create_hierarchical_community_file(
+                hh_community_file, pops, fam_links,
+                scale=scale,
+                target_num_communities=LAYER_PARAMS['familie']['number_of_communities'],
+                output_path=fam_community_file,
+            )
+
+            # Select fraction of household edges to pre-seed
+            import random
+            fam_pre_edges = random.sample(hh_edges, int(len(hh_edges) * family_fraction))
+
+            layers['familie'] = generate_layer(
+                'familie', pops, fam_links,
+                LAYER_PARAMS['familie'], scale,
+                community_file=fam_community_file,
+                pre_seed_edges=fam_pre_edges,
+            )
+            print(f"  familie: {layers['familie'].number_of_nodes()} nodes, "
+                  f"{layers['familie'].number_of_edges()} edges "
+                  f"(pre-seeded {len(fam_pre_edges)}, {time.perf_counter() - start:.2f}s)")
+
+            # ── 3. buren: hierarchical communities from household, ──
+            #       pre-seed ALL household edges
+            print(f"\n  --- Layer: buren (hierarchical, pre-seed ALL hh edges) ---")
+            start = time.perf_counter()
+            bur_links = f'Data/aggregated/tab_buren_{characteristics_string}.csv'
+            bur_community_file = f'communities_buren_{characteristics_string}.json'
+
+            create_hierarchical_community_file(
+                hh_community_file, pops, bur_links,
+                scale=scale,
+                target_num_communities=LAYER_PARAMS['buren']['number_of_communities'],
+                output_path=bur_community_file,
+            )
+
+            layers['buren'] = generate_layer(
+                'buren', pops, bur_links,
+                LAYER_PARAMS['buren'], scale,
+                community_file=bur_community_file,
+                pre_seed_edges=hh_edges,
+            )
+            print(f"  buren: {layers['buren'].number_of_nodes()} nodes, "
+                  f"{layers['buren'].number_of_edges()} edges "
+                  f"(pre-seeded {len(hh_edges)}, {time.perf_counter() - start:.2f}s)")
+
+            # ── 4. werkschool: independent, normal generation ──
+            print(f"\n  --- Layer: werkschool (independent) ---")
+            start = time.perf_counter()
+            ws_links = f'Data/aggregated/tab_werkschool_{characteristics_string}.csv'
+
+            layers['werkschool'] = generate_layer(
+                'werkschool', pops, ws_links,
+                LAYER_PARAMS['werkschool'], scale,
+            )
+            print(f"  werkschool: {layers['werkschool'].number_of_nodes()} nodes, "
+                  f"{layers['werkschool'].number_of_edges()} edges ({time.perf_counter() - start:.2f}s)")
 
             # Print summary
             print_layer_stats(layers)
