@@ -146,12 +146,11 @@ def establish_links(G, src_id, dst_id,
                             if global_key in G.popularity_pool:
                                 G.popularity_pool[global_key].append(d_from_db)
                 else:
+                    # Local: only add to current community's pool
                     if random.uniform(0,1) > fraction:
-                        # Local: only add to current community's pool
                         G.popularity_pool[pool_key].append(d_from_db)
                         dst_random_community_node = np.random.choice(dst_community_nodes)
                         G.popularity_pool[pool_key].append(dst_random_community_node)
-
 
             # Add edges to neighbors (clustering effect)
             if transitivity_p < random.uniform(0,1):
