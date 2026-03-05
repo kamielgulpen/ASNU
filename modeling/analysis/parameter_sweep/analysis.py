@@ -139,7 +139,7 @@ def calculate_variance_metrics(df, use_order=True):
 def test_h1(variance_df):
     """
     Test H1: Does between-network variance (CV) increase with aggregation?
-    Uses simple linear regression
+    Uses both linear and logarithmic regression
     
     For order column: low order = fine, high order = coarse
     So positive slope = variance increases with aggregation (as expected)
@@ -154,6 +154,8 @@ def test_h1(variance_df):
     else:
         x_col = 'aggregation_level'
 
+    all_results = []
+    
     for threshold in variance_df["threshold"].unique():
         variance_copy_df = variance_df[variance_df.threshold == threshold]
         # Remove NaN values
@@ -161,13 +163,13 @@ def test_h1(variance_df):
         data = variance_copy_df[[x_col, 'cv_between']].dropna()
 
         if len(data) < 3:
-            print("Not enough data points for regression")
-            # return None
+            print(f"\nNot enough data points for regression (threshold {threshold})")
+            continue
         
         x = data[x_col].values
         y = data['cv_between'].values
         
-        # Simple linear regression: y = slope * x + intercept
+        # ============ LINEAR REGRESSION ============
         n = len(x)
         x_mean = np.mean(x)
         y_mean = np.mean(y)
@@ -179,55 +181,107 @@ def test_h1(variance_df):
         intercept = y_mean - slope * x_mean
         
         # R-squared
-        y_pred = slope * x + intercept
-        ss_res = np.sum((y - y_pred) ** 2)
+        y_pred_linear = slope * x + intercept
+        ss_res_linear = np.sum((y - y_pred_linear) ** 2)
         ss_tot = np.sum((y - y_mean) ** 2)
-        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        r_squared_linear = 1 - (ss_res_linear / ss_tot) if ss_tot > 0 else 0
         
         # Simple significance test
-        std_err = np.sqrt(ss_res / (n - 2)) / np.sqrt(denominator)
+        std_err = np.sqrt(ss_res_linear / (n - 2)) / np.sqrt(denominator)
         t_stat = slope / std_err
 
         # Rough p-value interpretation
         if abs(t_stat) > 3:
-            p_value = "< 0.01"
-            significant = True
+            p_value_linear = "< 0.01"
+            significant_linear = True
         elif abs(t_stat) > 2:
-            p_value = "< 0.05"
-            significant = True
+            p_value_linear = "< 0.05"
+            significant_linear = True
         else:
-            p_value = "> 0.05"
-            significant = False
+            p_value_linear = "> 0.05"
+            significant_linear = False
         
-        print(f"\nLinear Regression: CV_between ~ aggregation_level for threshold {threshold}")
-        print(f"  Slope: {slope:.6f} (positive = variance increases with aggregation)")
-        print(f"  R²: {r_squared:.4f}")
-        print(f"  p-value: {p_value}")
-        print(f"  Significant: {'YES' if significant else 'NO'}")
+        # ============ LOGARITHMIC REGRESSION ============
+        # Model: y = a + b * log(x)
+        # Need x > 0 for log
+        if np.any(x <= 0):
+            print(f"\nWarning: Non-positive x values found for threshold {threshold}. Skipping log fit.")
+            log_a = log_b = r_squared_log = None
+            y_pred_log = None
+        else:
+            x_log = np.log(x)
+            x_log_mean = np.mean(x_log)
+            
+            numerator_log = np.sum((x_log - x_log_mean) * (y - y_mean))
+            denominator_log = np.sum((x_log - x_log_mean) ** 2)
+            
+            log_b = numerator_log / denominator_log
+            log_a = y_mean - log_b * x_log_mean
+            
+            # R-squared for log model
+            y_pred_log = log_a + log_b * x_log
+            ss_res_log = np.sum((y - y_pred_log) ** 2)
+            r_squared_log = 1 - (ss_res_log / ss_tot) if ss_tot > 0 else 0
+        
+        # ============ PRINT RESULTS ============
+        print(f"\n{'='*50}")
+        print(f"Threshold: {threshold}")
+        print(f"{'='*50}")
+        
+        print(f"\n1. LINEAR MODEL: y = {slope:.6f}*x + {intercept:.6f}")
+        print(f"   R²: {r_squared_linear:.4f}")
+        print(f"   p-value: {p_value_linear}")
+        print(f"   Significant: {'YES' if significant_linear else 'NO'}")
+        
+        if r_squared_log is not None:
+            print(f"\n2. LOGARITHMIC MODEL: y = {log_a:.6f} + {log_b:.6f}*log(x)")
+            print(f"   R²: {r_squared_log:.4f}")
+            
+            # Compare models
+            print(f"\n   MODEL COMPARISON:")
+            if r_squared_log > r_squared_linear:
+                diff = r_squared_log - r_squared_linear
+                print(f"   → Log model fits better (ΔR² = +{diff:.4f})")
+                print(f"   → Suggests diminishing returns to aggregation")
+            elif r_squared_linear > r_squared_log:
+                diff = r_squared_linear - r_squared_log
+                print(f"   → Linear model fits better (ΔR² = +{diff:.4f})")
+                print(f"   → Suggests constant rate of variance increase")
+            else:
+                print(f"   → Models fit equally well")
+        
         print()
         
-        if slope > 0 and significant:
+        if slope > 0 and significant_linear:
             print("✓ HYPOTHESIS SUPPORTED")
             print("  Variance INCREASES with aggregation")
             print("  → Coarse data introduces structural uncertainty")
-        elif slope < 0 and significant:
+        elif slope < 0 and significant_linear:
             print("✗ HYPOTHESIS REJECTED")
             print("  Variance DECREASES with aggregation")
             print("  → Large groups may average out extremes (Law of Large Numbers)")
         else:
             print("~ NO SIGNIFICANT TREND")
             print("  Variance is stable across aggregation levels")
+        
+        all_results.append({
+            'threshold': threshold,
+            'linear_slope': slope,
+            'linear_intercept': intercept,
+            'linear_r_squared': r_squared_linear,
+            'linear_p_value': p_value_linear,
+            'linear_significant': significant_linear,
+            'log_a': log_a,
+            'log_b': log_b,
+            'log_r_squared': r_squared_log,
+            'better_model': 'log' if r_squared_log and r_squared_log > r_squared_linear else 'linear'
+        })
     
-    return {
-        'slope': slope,
-        'r_squared': r_squared,
-        'p_value': p_value,
-        'significant': significant
-    }
+    return all_results
 
 
-def plot_results(variance_df, save_path='variance_plot.png'):
-    """Create simple, beautiful plots"""
+def plot_results(variance_df, test_results=None, save_path='variance_plot.png'):
+    """Create simple, beautiful plots with both linear and log fits"""
     print("\nCreating plots...")
     
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -248,31 +302,47 @@ def plot_results(variance_df, save_path='variance_plot.png'):
     agg_levels = sorted(plot_df['aggregation_level'].unique())
     
     thresholds = ["low", "med-low", "med-high", "high"]
+    
+    # Prepare x values for smooth curves
+    if len(agg_levels) > 1:
+        x_smooth = np.linspace(min(agg_levels), max(agg_levels), 100)
+    
     # 1. Between-network CV
     ax = axes[0]
     plot_df['threshold'] = round(plot_df['threshold'], 2)
+    
     for idx, threshold in enumerate(sorted(plot_df['threshold'].unique())):
         color = colors[idx % len(colors)]
         data = plot_df[plot_df['threshold'] == threshold]
         agg_avg = data.groupby('aggregation_level')['cv_between'].mean()
         threshold_label = thresholds[idx]
-        # Regression line (subtle)
-        if len(agg_levels) > 1:
-            z = np.polyfit(agg_levels, agg_avg.values, 1)
-            p = np.poly1d(z)
-            ax.plot(agg_levels, p(agg_levels), 
-                   linestyle='-', linewidth=1.5, color=color, alpha=0.25)
         
         # Scatter points
         ax.scatter(agg_levels, agg_avg.values, 
                   s=80, color=color, label=f'{threshold_label}', 
                   edgecolors='white', linewidth=2, zorder=3)
+        
+        # Fit curves if we have test results
+        if test_results and len(agg_levels) > 1:
+            threshold_results = [r for r in test_results if round(r['threshold'], 2) == threshold]
+            if threshold_results:
+                result = threshold_results[0]
+                
+                # Linear fit (solid line)
+                y_linear = result['linear_slope'] * x_smooth + result['linear_intercept']
+                ax.plot(x_smooth, y_linear, 
+                       linestyle='-', linewidth=1.5, color=color, alpha=0.3,
+                       label=f'{threshold_label} (linear R²={result["linear_r_squared"]:.3f})')
+                
+                # Log fit (dashed line) if available
+                if result['log_r_squared'] is not None:
+                    y_log = result['log_a'] + result['log_b'] * np.log(x_smooth)
+                    ax.plot(x_smooth, y_log, 
+                           linestyle='--', linewidth=1.5, color=color, alpha=0.3,
+                           label=f'{threshold_label} (log R²={result["log_r_squared"]:.3f})')
     
     ax.set_xlabel('Level of aggregation', fontsize=11)
     ax.set_ylabel('Between-Network CV', fontsize=11)
-    # ax.set_title('Focal Seeding', fontsize=12, fontweight='bold')
-    # ax.legend(frameon=False, title = 'contagion threshold')
-    
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     
@@ -299,7 +369,6 @@ def plot_results(variance_df, save_path='variance_plot.png'):
 
     ax.set_xlabel('Level of aggregation', fontsize=11)
     ax.set_ylabel('Within-Network CV', fontsize=11)
-    # ax.set_title('Focal Seeding', fontsize=12, fontweight='bold')
     ax.legend(frameon=False, title = 'Contagion thresholds')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -308,43 +377,6 @@ def plot_results(variance_df, save_path='variance_plot.png'):
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Plot saved to: {save_path}")
     plt.show()
-    
-    # # 3. Between vs Within SD
-    # ax = axes[1, 0]
-    # agg_summary = plot_df.groupby('aggregation_level')[['between_sd', 'within_sd']].mean()
-    # x = np.arange(len(agg_summary))
-    # width = 0.35
-    # ax.bar(x - width/2, agg_summary['between_sd'], width, 
-    #        label='Between (structural)', color='steelblue')
-    # ax.bar(x + width/2, agg_summary['within_sd'], width, 
-    #        label='Within (stochastic)', color='coral')
-    # ax.set_xlabel('Aggregation Level', fontsize=11, fontweight='bold')
-    # ax.set_ylabel('Standard Deviation', fontsize=11, fontweight='bold')
-    # ax.set_title('Variance Components', fontsize=12, fontweight='bold')
-    # ax.set_xticks(x)
-    # ax.set_xticklabels(x_labels, fontsize=9)
-    # ax.legend()
-    # ax.grid(True, alpha=0.3, axis='y')
-    
-    # # 4. Mean outcome by aggregation
-    # ax = axes[1, 1]
-    # for threshold in sorted(plot_df['threshold'].unique()):
-    #     data = plot_df[plot_df['threshold'] == threshold]
-    #     agg_avg = data.groupby('aggregation_level')['mean_outcome'].mean()
-    #     ax.plot(range(len(agg_avg)), agg_avg.values, 
-    #             marker='^', label=f'θ={threshold}', linewidth=2, markersize=8)
-    # ax.set_xticks(range(len(x_labels)))
-    # ax.set_xticklabels(x_labels, fontsize=9)
-    # ax.set_xlabel('Aggregation Level', fontsize=11, fontweight='bold')
-    # ax.set_ylabel('Mean Final Adoption', fontsize=11, fontweight='bold')
-    # ax.set_title('Mean Diffusion Outcomes', fontsize=12, fontweight='bold')
-    # ax.legend()
-    # ax.grid(True, alpha=0.3)
-    
-    # plt.tight_layout()
-    # plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    # print(f"Plot saved to: {save_path}")
-    # plt.show()
 
 
 def print_summary(variance_df):
@@ -485,7 +517,7 @@ def main(file_path, show_structure_breakdown=False):
     # Calculate metrics (variance across ALL network structures)
     variance_df = calculate_variance_metrics(df, use_order=use_order)
     
-    # Test H1
+    # Test H1 (now returns list of results for all thresholds)
     test_results = test_h1(variance_df)
     
     # Summary table
@@ -497,12 +529,18 @@ def main(file_path, show_structure_breakdown=False):
     else:
         structure_df = None
     
-    # Plot
-    plot_results(variance_df)
+    # Plot (now with test results for curves)
+    plot_results(variance_df, test_results=test_results)
     
     # Save results
     variance_df.to_csv('variance_metrics.csv', index=False)
     print("\nResults saved to: variance_metrics.csv")
+    
+    # Save regression results
+    if test_results:
+        results_df = pd.DataFrame(test_results)
+        results_df.to_csv('regression_results.csv', index=False)
+        print("Regression results saved to: regression_results.csv")
     
     if show_structure_breakdown and structure_df is not None:
         structure_df.to_csv('variance_by_structure.csv', index=False)
@@ -516,7 +554,7 @@ if __name__ == "__main__":
     # Script automatically uses 'order' column if available
     # (low order = fine/granular, high order = coarse/aggregated)
     
-    df, variance_df, results = main('results/parameter_sweep/focal_sweep_results.csv')
+    df, variance_df, results = main('modeling/analysis/parameter_sweep/checkpoint_sweep_0.01_he.csv')
 
     
     # Optional: Show breakdown by network structure
