@@ -20,6 +20,6 @@ __author__ = "Your Name"
 
 from asnu.core.generate import generate
 from asnu.core.graph import NetworkXGraph
-from asnu.core.community import create_communities
+from asnu.core.community import create_communities, create_hierarchical_community_file
 
-__all__ = ['generate', 'NetworkXGraph', 'create_communities']
+__all__ = ['generate', 'NetworkXGraph', 'create_communities', 'create_hierarchical_community_file']

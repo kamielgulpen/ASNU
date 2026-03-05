@@ -17,9 +17,81 @@ from scipy import sparse
 from scipy.stats import entropy
 import math
 import pandas as pd
+import numba
 
 sns.set_style("whitegrid")
 np.random.seed(42)
+
+
+@numba.njit(parallel=True, cache=True)
+def _complex_contagion_kernel(data, indices, indptr, degree, state, threshold, is_fractional, max_steps):
+    """
+    JIT-compiled contagion kernel. Runs all simulations in parallel over nodes.
+
+    Args:
+        data, indices, indptr: CSR sparse adjacency matrix components
+        degree: (n,) node degree array
+        state: (n, n_sims) initial infection state — modified in-place
+        threshold: adoption threshold value
+        is_fractional: True for fractional threshold, False for absolute
+        max_steps: maximum simulation steps
+
+    Returns:
+        time_series: (actual_steps+1, n_sims) int64 array of infected counts
+    """
+    n, n_sims = state.shape
+    infected_counts = np.empty((n, n_sims), dtype=np.float64)
+    time_series = np.empty((max_steps + 1, n_sims), dtype=np.int64)
+
+    # Record initial totals
+    for s in range(n_sims):
+        t = np.int64(0)
+        for i in range(n):
+            t += np.int64(state[i, s] > 0.0)
+        time_series[0, s] = t
+
+    actual_steps = 0
+
+    for step in range(max_steps):
+        # Sparse matmul: infected_counts = adj @ state
+        # prange parallelizes over rows; inner loops are sequential per thread
+        for i in numba.prange(n):
+            row_start = indptr[i]
+            row_end = indptr[i + 1]
+            for s in range(n_sims):
+                val = 0.0
+                for j_ptr in range(row_start, row_end):
+                    val += data[j_ptr] * state[indices[j_ptr], s]
+                infected_counts[i, s] = val
+
+        # Threshold check and state update (each node is independent)
+        for i in numba.prange(n):
+            d = degree[i]
+            for s in range(n_sims):
+                if state[i, s] == 0.0:
+                    ic = infected_counts[i, s]
+                    if is_fractional:
+                        meets = (d > 0.0) and (ic / d >= threshold)
+                    else:
+                        meets = ic >= threshold
+                    if meets:
+                        state[i, s] = 1.0
+
+        # Record totals and check early stopping
+        all_done = True
+        for s in range(n_sims):
+            t = np.int64(0)
+            for i in range(n):
+                t += np.int64(state[i, s] > 0.0)
+            time_series[step + 1, s] = t
+            if t != np.int64(n) and t != time_series[step, s]:
+                all_done = False
+
+        actual_steps += 1
+        if all_done:
+            break
+
+    return time_series[:actual_steps + 1]
 
 
 class ContagionSimulator:
@@ -206,32 +278,14 @@ class ContagionSimulator:
         state = np.zeros((self.n, n_simulations), dtype=np.float64)
         self._seed_state(state, n_simulations, seeding, initial_infected)
 
-        totals = np.sum(state, axis=0)
-        time_series = [totals.copy()]
+        is_fractional = (threshold_type != 'absolute')
+        ts = _complex_contagion_kernel(
+            self.adj.data, self.adj.indices, self.adj.indptr,
+            self.degree, state, float(threshold), is_fractional, max_steps
+        )
 
-        for step in range(max_steps):
-            infected_counts = self.adj @ state  # (n, n_sims)
-            susceptible = (state == 0)
-
-            if threshold_type == 'absolute':
-                meets_threshold = infected_counts >= threshold
-            else:  # fractional (contested)
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    fraction = infected_counts / self.degree[:, np.newaxis]
-                fraction = np.where(self.degree[:, np.newaxis] == 0, 0, fraction)
-                meets_threshold = fraction >= threshold
-
-            new_adopters = susceptible & meets_threshold
-            state[new_adopters] = 1.0
-
-            prev_totals = totals
-            totals = np.sum(state, axis=0)
-            time_series.append(totals.copy())
-
-            if np.all(totals == self.n) or np.all(totals == prev_totals):
-                break
-
-        return [[int(time_series[t][sim]) for t in range(len(time_series))]
+        # ts shape: (actual_steps+1, n_sims) — convert to list-of-lists per sim
+        return [[int(ts[t, sim]) for t in range(ts.shape[0])]
                 for sim in range(n_simulations)]
 
     def hybrid_contagion(self, base_threshold=2, vulnerable_threshold=1,

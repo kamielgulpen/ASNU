@@ -169,7 +169,7 @@ def _setup_no_community_structure(G):
 
 def _run_edge_creation_python(G, links_path, fraction, reciprocity_p, transitivity_p,
                               verbose, src_suffix, dst_suffix, pa_scope,
-                              bridge_probability=0):
+                              bridge_probability=0, pre_seed_edges=None):
     """Pure-Python fallback for edge creation."""
     warnings = []
     df_n_group_links = read_file(links_path)
@@ -216,7 +216,7 @@ def _run_edge_creation_python(G, links_path, fraction, reciprocity_p, transitivi
 
 def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
                        verbose, src_suffix, dst_suffix, pa_scope,
-                       bridge_probability=0):
+                       bridge_probability=0, pre_seed_edges=None):
     """
     Run the edge creation loop using the community structure already set on G.
     Tries Rust backend, falls back to Python.
@@ -226,7 +226,8 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
     except ImportError:
         _run_edge_creation_python(G, links_path, fraction, reciprocity_p,
                                   transitivity_p, verbose, src_suffix, dst_suffix, pa_scope,
-                                  bridge_probability=bridge_probability)
+                                  bridge_probability=bridge_probability,
+                                  pre_seed_edges=pre_seed_edges)
         return
 
     if verbose:
@@ -255,11 +256,17 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
     vcm = {(int(k[0]), int(k[1])): [int(c) for c in v]
            for k, v in group_pair_to_communities.items()}
 
+    # Convert pre_seed_edges for Rust (list of (int, int) tuples or None)
+    rust_pre_edges = None
+    if pre_seed_edges:
+        rust_pre_edges = [(int(u), int(v)) for u, v in pre_seed_edges]
+
     new_edges, link_counts = rust_edge_creation(
         group_pairs, vcm, mnl, ctn, ntg,
         fraction, reciprocity_p, transitivity_p,
         pa_scope, G.number_of_communities,
         bridge_probability,
+        rust_pre_edges,
     )
 
     # Apply edges to the NetworkX graph
@@ -275,7 +282,8 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
              transitivity, base_path="graph_data", verbose=True,
              pop_column='n', src_suffix='_src', dst_suffix='_dst', link_column='n',
              fill_unfulfilled=True, fully_connect_communities=False,
-             pa_scope='local', community_file=None, bridge_probability=0):
+             pa_scope='local', community_file=None, bridge_probability=0,
+             pre_seed_edges=None):
     """
     Generate a population-based network using NetworkX.
 
@@ -374,6 +382,16 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
         if verbose:
             print(f"  Loaded {G.number_of_communities} communities from {community_file}")
 
+        # Pre-seed edges into the graph (for multiplex hierarchical generation)
+        if pre_seed_edges:
+            G.graph.add_edges_from(pre_seed_edges)
+            for u, v in pre_seed_edges:
+                src_g = G.nodes_to_group[u]
+                dst_g = G.nodes_to_group[v]
+                G.existing_num_links[(src_g, dst_g)] += 1
+            if verbose:
+                print(f"  Pre-seeded {len(pre_seed_edges)} edges into graph")
+
         if fully_connect_communities:
             if verbose:
                 print("\nStep 2b: Fully connecting nodes within communities...")
@@ -384,7 +402,8 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
             _run_edge_creation(G, links_path, preferential_attachment_fraction,
                                reciprocity, transitivity, verbose,
                                src_suffix, dst_suffix, pa_scope,
-                               bridge_probability=bridge_probability)
+                               bridge_probability=bridge_probability,
+                               pre_seed_edges=pre_seed_edges)
 
             if fill_unfulfilled:
                 if verbose:
