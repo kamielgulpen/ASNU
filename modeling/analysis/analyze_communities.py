@@ -100,7 +100,6 @@ def analyze(path="my_communities.json"):
 
         h = shannon_entropy(counts)
         entropies.append(h)
-
         d = simpson_index(counts)
         simpsons.append(d)
 
