@@ -169,7 +169,7 @@ def create_plots(csv_path, output_dir):
         return
     
     # Create discrete HHI bins
-    n_bins = 5
+    n_bins = 8
     df['hhi_bin'] = pd.cut(df['hhi'], bins=n_bins, labels=False)
     
     # Calculate variances

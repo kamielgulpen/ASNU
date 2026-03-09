@@ -169,6 +169,97 @@ class ContagionSimulator:
                 nodes = np.random.choice(self.n, initial_infected, replace=False)
                 state[nodes, sim] = 1.0
 
+    def complex_contagion_heterogeneous(self, threshold=0.3, threshold_type='fractional',
+                                   threshold_std=0.1, threshold_dist='normal',
+                                   initial_infected=1, max_steps=30, n_simulations=1,
+                                   seeding='random'):
+        """
+        Deterministic threshold model with heterogeneous thresholds.
+        
+        Args:
+            threshold: Mean threshold value (scalar) or array of per-node thresholds (n,)
+            threshold_type: 'absolute' or 'fractional'
+            threshold_std: Standard deviation for threshold distribution (ignored if threshold is array)
+            threshold_dist: 'normal', 'uniform', or 'fixed'
+                        - 'normal': draws from N(threshold, threshold_std²)
+                        - 'uniform': draws from U(threshold - threshold_std, threshold + threshold_std)
+                        - 'fixed': uses threshold as-is for all nodes
+            initial_infected: Number of seed nodes (for seeding='random')
+            max_steps: Maximum simulation steps
+            n_simulations: Number of parallel runs
+            seeding: 'random' (N random nodes) or 'focal_neighbors'
+        """
+        # Initialize state
+        threshold_std = threshold * 0.25 # threshold_std is 25% of mean
+        state = np.zeros((self.n, n_simulations), dtype=np.float64)
+        self._seed_state(state, n_simulations, seeding, initial_infected)
+        
+        # Generate or validate thresholds
+        if np.isscalar(threshold):
+            if threshold_dist == 'normal':
+                # Draw from normal distribution with given mean and std
+                thresholds = np.random.normal(threshold, threshold_std, size=self.n)
+                if threshold_type == 'fractional':
+                    # Clip to [0, 1] for fractional thresholds
+                    thresholds = np.clip(thresholds, 0.0, 1.0)
+                else:
+                    # Clip to non-negative for absolute thresholds
+                    thresholds = np.maximum(thresholds, 0.0)
+            elif threshold_dist == 'uniform':
+                # Draw from uniform distribution
+                low = threshold - threshold_std
+                high = threshold + threshold_std
+                if threshold_type == 'fractional':
+                    low = max(0.0, low)
+                    high = min(1.0, high)
+                else:
+                    low = max(0.0, low)
+                thresholds = np.random.uniform(low, high, size=self.n)
+            else:  # 'fixed'
+                thresholds = np.full(self.n, threshold, dtype=np.float64)
+        else:
+            # User provided per-node thresholds
+            thresholds = np.asarray(threshold, dtype=np.float64)
+            if thresholds.shape[0] != self.n:
+                raise ValueError(f"Threshold array must have length {self.n}")
+        
+        # Reshape for broadcasting: (n, 1)
+        thresholds = thresholds.reshape(-1, 1)
+
+        # Run simulation
+        totals = np.sum(state, axis=0)
+        time_series = [totals.copy()]
+        
+        for step in range(max_steps):
+            infected_counts = self.adj @ state  # (n, n_sims)
+            susceptible = (state == 0)
+            
+            if threshold_type == 'absolute':
+                # Compare infected neighbors to absolute threshold
+                meets_threshold = infected_counts >= thresholds
+            else:  # fractional
+                # Compare fraction of infected neighbors to fractional threshold
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    fraction = infected_counts / self.degree[:, np.newaxis]
+                fraction = np.where(self.degree[:, np.newaxis] == 0, 0, fraction)
+                meets_threshold = fraction >= thresholds
+            
+            new_adopters = susceptible & meets_threshold
+            state[new_adopters] = 1.0
+            
+            prev_totals = totals
+            totals = np.sum(state, axis=0)
+            time_series.append(totals.copy())
+            
+            if np.all(totals < self.n * 0.01):
+                print(totals)
+            # Stop if converged
+            if np.all(totals == self.n) or np.all(totals == prev_totals):
+                break
+        
+        return [[int(time_series[t][sim]) for t in range(len(time_series))]
+                    for sim in range(n_simulations)]
+    
     def complex_contagion(self, threshold=2, threshold_type='absolute',
                          initial_infected=1, max_steps=30, n_simulations=1,
                          seeding='random'):

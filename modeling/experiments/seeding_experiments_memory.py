@@ -24,7 +24,7 @@ from contagion_experiment import ContagionSimulator, load_networks
 @dataclass
 class SimulationConfig:
     """Simulation parameters."""
-    n_simulations: int = 20
+    n_simulations: int = 50
     max_steps: int = 50
     threshold_type: str = 'fractional'
     initial_infected_fraction: float = 0.01
@@ -378,13 +378,17 @@ class ContagionAnalyzer:
         try:
             # Load only needed networks
             network_graphs = load_networks(str(folder), add_random=False)
-            characteristic_groups = ["geslacht", "etngrp_geslacht_lft_oplniv", 
-                                   "geslacht_oplniv", "lft", "etngrp_oplniv"]
+
+            
+            characteristic_groups = ["geslacht_lft", "etngrp", "lft", "etngrp_geslacht_lft_oplniv", "etngrp_geslacht_lft", "geslacht"]
             
             # Extract only the graphs we need
             networks = {key: network_graphs[key].graph 
                        for key in network_graphs 
                        if key in characteristic_groups}
+            
+            # networks = {key: network_graphs[key].graph 
+            #            for key in network_graphs}
             
             # Run simulations
             contested_results, ratios = self._sweep_contested(networks)
@@ -503,11 +507,12 @@ class ContagionAnalyzer:
                 )
                 finals[i] = {
                     "mean": np.mean([ts[-1] for ts in ts_list]),
+                    "initial_mean": np.mean([ts[0] for ts in ts_list]),
                     "variance": np.var([ts[-1] for ts in ts_list])
                 }
                 del ts_list  # Clear after processing
-            
-            results[name] = finals
+
+            results[name] = finals            
             del sim  # Clear simulator
             gc.collect()
         
@@ -714,6 +719,7 @@ def run_parameter_sweep(n_iterations: int = 10,
                        resume: bool = True):
     """Run and visualize parameter sweep with memory optimization."""
     analyzer = ContagionAnalyzer()
+    
     results = analyzer.run_parameter_sweep(
         n_iterations=n_iterations,
         batch_size=batch_size,
@@ -723,7 +729,7 @@ def run_parameter_sweep(n_iterations: int = 10,
     
     # Save final results
     out_path = Path(output_dir)
-    results.to_csv(out_path / "sweep_results_final.csv", index=False)
+    results.to_csv(out_path / f"sweep_results_final{analyzer.net.scale}.csv", index=False)
     print(f"\nFinal results saved to {out_path / 'sweep_results_final.csv'}")
     
     # Visualize (use smaller dataset if too large)
