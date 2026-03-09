@@ -721,7 +721,7 @@ if __name__ == "__main__":
     
     results = run_parallel_sweep(
         n_iterations=100,
-        n_jobs=10,  # Use all CPUs except one
+        n_jobs=3,  # Use all CPUs except one
         resume=True
     )
     
