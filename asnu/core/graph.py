@@ -85,6 +85,9 @@ class NetworkXGraph:
         self.probability_matrix = np.zeros((2,3))
         self.number_of_communities = 0
 
+        # Group pairs that community structure cannot serve (handled by fill_unfulfilled)
+        self.infeasible_pairs = set()
+
         # Global popularity pool for preferential attachment with memory
         # Keyed by (community_id, group_id) -> list of nodes (with duplicates for weighting)
         self.popularity_pool = {}

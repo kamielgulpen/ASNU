@@ -21,6 +21,7 @@ import csv
 import random
 from collections import Counter
 from itertools import product
+from tqdm import tqdm
 
 import numpy as np
 
@@ -70,252 +71,27 @@ def build_group_pair_to_communities_lookup(G, verbose=False):
     return group_pair_to_communities
 
 
-def _process_nodes_python(G, all_nodes, node_groups, community_composition,
-                          community_sizes, group_exposure, ideal,
-                          target_counts, total_nodes):
-    """Pure-Python fallback for the node assignment loop."""
-    for node_idx in range(len(all_nodes)):
-        node = all_nodes[node_idx]
-        group = node_groups[node_idx]
-
-        current_exp = group_exposure[group, :]
-
-        hypothetical_exp = current_exp + community_composition
-        hypothetical_totals = hypothetical_exp.sum(axis=1, keepdims=True)
-        hypothetical_totals = np.maximum(hypothetical_totals, 1e-10)
-        hypothetical_dist = hypothetical_exp / hypothetical_totals
-
-        diff = hypothetical_dist - ideal[group, :]
-        distances = np.sqrt((diff ** 2).sum(axis=1))
-
-        if target_counts is not None:
-            full_mask = community_sizes >= target_counts
-            distances[full_mask] = np.inf
-
-        temperature = 1.0 - (node_idx / total_nodes)
-        if temperature > 0.05:
-            valid_mask = distances < np.inf
-            if valid_mask.sum() > 1:
-                d = distances[valid_mask]
-                scaled = -d / (temperature + 1e-10)
-                scaled = scaled - scaled.max()
-                probs = np.exp(scaled)
-                probs = probs / probs.sum()
-                valid_indices = np.where(valid_mask)[0]
-                best_community = np.random.choice(valid_indices, p=probs)
-            else:
-                best_community = np.argmin(distances)
-        else:
-            best_community = np.argmin(distances)
-
-        G.communities_to_nodes[(best_community, group)].append(node)
-        G.nodes_to_communities[node] = best_community
-        G.communities_to_groups[best_community].append(group)
-
-        group_exposure[group, :] += community_composition[best_community, :]
-        mask = community_composition[best_community, :] > 0
-        group_exposure[mask, group] += 1
-
-        community_composition[best_community, group] += 1
-        community_sizes[best_community] += 1
-
-        if (node_idx + 1) % 500 == 0:
-            print(f"Assigned {node_idx + 1}/{total_nodes} nodes ({100*(node_idx+1)/total_nodes:.1f}%)")
-
-
-def populate_communities(G, num_communities, community_size_distribution='natural'):
-    """
-    Assign nodes to communities using group-aligned agent decision making.
-
-    Each node (agent) chooses a community by optimizing for its GROUP's collective
-    alignment with the ideal link distribution. Uses vectorized operations for speed.
-
-    Agent Decision-Making Protocol:
-    1. Track Current Distribution: Group exposure to other groups across communities
-    2. Calculate Distance from Ideal: Compare against ideal link distribution
-    3. Evaluate Action Consequences: Vectorized distance calculation for all communities
-    4. Select Optimal Action: Choose community minimizing distance to ideal
-
-    Parameters
-    ----------
-    G : NetworkXGraph
-        Graph object with nodes and group assignments
-    num_communities : int
-        Number of communities to create
-    seed_groups : list
-        Initial group IDs to seed each community
-    community_size_distribution : str or array-like, optional
-        Controls community size distribution
-    """
-    total_nodes = len(list(G.graph.nodes))
-    n_groups = int(len(G.group_ids))
-
-    # Create affinity matrix from link counts
-    affinity = np.zeros((n_groups, n_groups))
-    for (i, j), count in G.maximum_num_links.items():
-        affinity[i, j] = count
-
-    # Normalize affinity to get probability matrix
-    epsilon = 1e-5
-    normalized = affinity / (affinity.sum(axis=1, keepdims=True) + epsilon)
-    normalized[normalized == 0] = epsilon
-
-    # Store for later use in community assignment
-    G.probability_matrix = normalized.copy()
-    G.number_of_communities = num_communities
-
-
-    # Calculate target community sizes
-    if isinstance(community_size_distribution, (list, np.ndarray)):
-        target_sizes = np.array(community_size_distribution)
-        if not np.isclose(target_sizes.sum(), 1.0):
-            raise ValueError("Custom community_size_distribution must sum to 1")
-    elif community_size_distribution == 'powerlaw':
-        ranks = np.arange(1, num_communities + 1)
-        sizes = 1.0 / (ranks ** 1)
-        target_sizes = sizes / sizes.sum()
-    elif community_size_distribution == 'uniform':
-        target_sizes = np.ones(num_communities) / num_communities
-    else:  # 'natural'
-        target_sizes = None
-
-    # Initialize community structures
-    for community_idx in range(num_communities):
-        for group_id in range(n_groups):
-            G.communities_to_nodes[(community_idx, group_id)] = []
-        G.communities_to_groups[community_idx] = []
-
-    # Vectorized tracking arrays
-    # community_composition[c, g] = count of group g in community c
-    community_composition = np.zeros((num_communities, n_groups), dtype=np.float64)
-    community_sizes = np.zeros(num_communities, dtype=np.int32)
-
-    # group_exposure[g, h] = cumulative exposure of group g to group h
-    group_exposure = np.zeros((n_groups, n_groups), dtype=np.float64)
-
-    # Ideal distribution from link probability matrix
-    ideal = G.probability_matrix.copy()  # shape: (n_groups, n_groups)
-
-    # Target sizes for distribution control
-    if target_sizes is not None:
-        target_counts = (target_sizes * total_nodes).astype(np.int32)
-        remainder = total_nodes - target_counts.sum()
-        for i in range(remainder):
-            target_counts[i % num_communities] += 1
-
-    # Shuffle and get node groups as array
-    all_nodes = np.array(list(G.graph.nodes))
-    np.random.shuffle(all_nodes)
-    node_groups = np.array([G.nodes_to_group[n] for n in all_nodes])
-
-    # Process nodes — try Rust, fall back to Python
-
-
-    try:
-        from asnu_rust import process_nodes
-        print("Using Rust backend for node processing...")
-        assignments = process_nodes(
-            all_nodes.astype(np.int64), node_groups.astype(np.int64),
-            community_composition, community_sizes,
-            group_exposure, ideal,
-            target_counts if target_sizes is not None else None,
-            total_nodes,
-        )
-        for i in range(len(all_nodes)):
-            node = int(all_nodes[i])
-            comm = int(assignments[i])
-            group = int(node_groups[i])
-            G.communities_to_nodes[(comm, group)].append(node)
-            G.nodes_to_communities[node] = comm
-            G.communities_to_groups[comm].append(group)
-    except ImportError:
-        _process_nodes_python(
-            G, all_nodes, node_groups, community_composition,
-            community_sizes, group_exposure, ideal,
-            target_counts if target_sizes is not None else None,
-            total_nodes,
-        )
-
-    print(f"\nCommunity population complete: {len(all_nodes)} nodes assigned")
-    # === DIAGNOSTIC 1: Community Size Distribution ===
-    print("\n" + "="*60)
-    print("DIAGNOSTIC 1: Community Size Distribution")
-    print("="*60)
-    non_empty = community_sizes[community_sizes > 0]
-    print(f"Total communities: {num_communities}")
-    print(f"Non-empty communities: {len(non_empty)}")
-    print(f"Empty communities: {num_communities - len(non_empty)}")
-    print(f"Size stats - Mean: {np.mean(non_empty):.1f}, Std: {np.std(non_empty):.1f}")
-    print(f"Size stats - Min: {np.min(non_empty)}, Max: {np.max(non_empty)}, Median: {np.median(non_empty):.1f}")
-
-    # Size distribution buckets
-    percentiles = [0, 25, 50, 75, 90, 95, 99, 100]
-    print(f"Size percentiles: {dict(zip(percentiles, [int(np.percentile(non_empty, p)) for p in percentiles]))}")
-
-    # Top 10 largest communities
-    top_indices = np.argsort(community_sizes)[-10:][::-1]
-    print(f"Top 10 largest communities: {[(int(i), int(community_sizes[i])) for i in top_indices]}")
-
-    # === DIAGNOSTIC 2: Group Distribution Across Communities ===
-    print("\n" + "="*60)
-    print("DIAGNOSTIC 2: Group Distribution Across Communities")
-    print("="*60)
-
-    # For each group, count how many communities it appears in
-    groups_per_community = (community_composition > 0).sum(axis=1)  # groups per community
-    communities_per_group = (community_composition > 0).sum(axis=0)  # communities per group
-
-    print(f"Groups per community - Mean: {np.mean(groups_per_community):.1f}, Std: {np.std(groups_per_community):.1f}")
-    print(f"Communities per group - Mean: {np.mean(communities_per_group):.1f}, Std: {np.std(communities_per_group):.1f}")
-
-    # Show group concentration in top communities
-    print("\nGroup presence in top 5 largest communities:")
-    for comm_idx in top_indices[:5]:
-        groups_present = np.where(community_composition[comm_idx, :] > 0)[0]
-        group_counts = community_composition[comm_idx, groups_present].astype(int)
-        # Sort by count
-        sorted_idx = np.argsort(group_counts)[::-1]
-        top_groups = [(int(groups_present[i]), int(group_counts[i])) for i in sorted_idx[:5]]
-        print(f"  Community {comm_idx} (size {int(community_sizes[comm_idx])}): top groups {top_groups}")
-
-    # === DIAGNOSTIC 3: Exposure vs Ideal Alignment ===
-    print("\n" + "="*60)
-    print("DIAGNOSTIC 3: Group Exposure vs Ideal Alignment")
-    print("="*60)
-
-    # Normalize group exposure to get actual distribution
-    group_exposure_totals = group_exposure.sum(axis=1, keepdims=True)
-    group_exposure_totals = np.maximum(group_exposure_totals, 1e-10)
-    actual_distribution = group_exposure / group_exposure_totals
-
-    # Calculate per-group distance from ideal
-    group_distances = np.sqrt(((actual_distribution - ideal) ** 2).sum(axis=1))
-
-    print(f"Distance from ideal - Mean: {np.mean(group_distances):.4f}, Std: {np.std(group_distances):.4f}")
-    print(f"Distance from ideal - Min: {np.min(group_distances):.4f}, Max: {np.max(group_distances):.4f}")
-
-    # Best and worst aligned groups
-    best_groups = np.argsort(group_distances)[:5]
-    worst_groups = np.argsort(group_distances)[-5:][::-1]
-    print(f"\nBest aligned groups (lowest distance): {[(int(g), f'{group_distances[g]:.4f}') for g in best_groups]}")
-    print(f"Worst aligned groups (highest distance): {[(int(g), f'{group_distances[g]:.4f}') for g in worst_groups]}")
-
-    # Show detailed comparison for worst aligned group
-    worst_group = worst_groups[0]
-    print(f"\nDetailed view for worst aligned group {worst_group}:")
-    print(f"  Ideal distribution (top 5):  {sorted(enumerate(ideal[worst_group]), key=lambda x: -x[1])[:5]}")
-    print(f"  Actual distribution (top 5): {sorted(enumerate(actual_distribution[worst_group]), key=lambda x: -x[1])[:5]}")
-
-    print("="*60 + "\n")
-
+def populate_communities(G, num_communities, community_size_distribution='natural', new_comm_penalty=100.0):
+    """Thin wrapper around populate_communities_capacity with a high new_comm_penalty."""
+    populate_communities_capacity(
+        G, num_communities,
+        community_size_distribution=community_size_distribution,
+        new_comm_penalty=new_comm_penalty,
+    )
 
 def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
-                                   target, total_nodes, target_counts):
+                                   target, total_nodes, target_counts, new_comm_penalty):
     """Pure-Python fallback for capacity-based node assignment using matrix ops.
 
     Optimized: only evaluates non-empty communities, avoids matrix copies,
     pre-allocates with room to grow.
+
+    Uses soft penalty for budget overshoot (instead of hard feasibility rejection)
+    and always includes a new empty community as a candidate, so communities are
+    only created when that genuinely minimises the remaining edge-budget distance.
     """
+    OVERSHOOT_PENALTY = 10.0
+
     n_groups = target.shape[0]
 
     # Pre-allocate with extra room for dynamic growth
@@ -330,72 +106,100 @@ def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
     # Pre-compute target rows/cols for each group (avoids repeated indexing)
     target_rows = [target[g, :].copy() for g in range(n_groups)]
     target_cols = [target[:, g].copy() for g in range(n_groups)]
-    
+
     random.shuffle(all_nodes)
 
-    eps = 1e-6
     for node_idx in range(len(all_nodes)):
         node = all_nodes[node_idx]
         g = node_groups[node_idx]
-        best_community = None
+
+        tgt_row = target_rows[g]
+        tgt_col = target_cols[g]
+        acc_row_g = accumulated[g, :]
+        acc_col_g = accumulated[:, g]
+
+        # Baseline distance: zero-count contribution for all groups h
+        # rem_row[h] = tgt_row[h] - acc_row[g,h],  rem_col[h] = tgt_col[h] - acc_col[h,g]
+        # base = sum_h(rem_row[h]^2) + sum_{h!=g}(rem_col[h]^2)
+        rem_row_sq = (tgt_row - acc_row_g) ** 2      # (n_groups,)
+        rem_col_sq = (tgt_col - acc_col_g) ** 2      # (n_groups,)
+        base = float(rem_row_sq.sum() + rem_col_sq.sum() - rem_col_sq[g])
+
+        # New empty community has zero composition → distance is exactly sqrt(base),
+        # penalized to discourage creating new communities and encourage larger ones.
+        new_comm_dist = new_comm_penalty * (base ** 0.5)
+
+        eval_count = num_active  # index of the "new community" candidate
 
         if num_active > 0:
-            # Only evaluate non-empty communities (view, no copy)
-            active = comp[:num_active]
+            active = comp[:num_active]   # (num_active, n_groups) view, no copy
 
-            # Hypothetical outgoing: accumulated[g,:] + comp[c,:], with 2x for self-group
-            hyp_row = accumulated[g, :] + active  # new array via broadcast, no copy needed
-            hyp_row[:, g] += active[:, g]         # in-place: self-group becomes 2x
+            # Fully vectorized — no Python loop over groups
+            # Step 1: soft-penalty costs assuming hyp = acc + count (h != g treatment)
+            rem_row = tgt_row - (acc_row_g + active)   # (num_active, n_groups)
+            rem_col = tgt_col - (acc_col_g + active)   # (num_active, n_groups)
+            eff_row = np.where(rem_row < 0, OVERSHOOT_PENALTY * rem_row ** 2, rem_row ** 2)
+            eff_col = np.where(rem_col < 0, OVERSHOOT_PENALTY * rem_col ** 2, rem_col ** 2)
 
-            # Hypothetical incoming: accumulated[:,g] + comp[c,:], excluding self-group
-            hyp_col = accumulated[:, g] + active  # new array via broadcast
-            hyp_col[:, g] -= active[:, g]         # in-place: remove self-group (in hyp_row)
+            # Step 2: where count == 0, revert to zero-count baseline (no penalty)
+            has_active = active > 0   # (num_active, n_groups)
+            eff_row = np.where(has_active, eff_row, rem_row_sq)
+            eff_col = np.where(has_active, eff_col, rem_col_sq)
 
-            # Feasibility: don't exceed budget
-            tgt_row = target_rows[g]
-            tgt_col = target_cols[g]
-            
-            feasible = np.all(hyp_row <= tgt_row * 1.01, axis=1) & np.all(hyp_col <= tgt_col * 1.01, axis=1)
-            
+            # Step 3: sum all h, drop col term for h == g (no col term in Rust for self-group)
+            dist_sq = eff_row.sum(axis=1) + eff_col.sum(axis=1) - eff_col[:, g]
+
+            # Step 4: fix row term for h == g — Rust uses 2*count, not 1*count
+            hyp_gg = acc_row_g[g] + 2.0 * active[:, g]
+            rem_gg = tgt_row[g] - hyp_gg
+            gg_cost = np.where(rem_gg < 0, OVERSHOOT_PENALTY * rem_gg ** 2, rem_gg ** 2)
+            dist_sq += np.where(has_active[:, g], gg_cost - eff_row[:, g], 0.0)
+
+            distances = np.sqrt(np.maximum(0.0, dist_sq))
+
+            # Hard size limit (if specified) — still respected
             if target_counts is not None:
                 tc_len = min(num_active, len(target_counts))
-                feasible[:tc_len] &= community_sizes[:tc_len] < target_counts[:tc_len]
+                distances[:tc_len][community_sizes[:tc_len] >= target_counts[:tc_len]] = np.inf
 
-            if np.any(feasible):
-                remaining_row = tgt_row - hyp_row
-                remaining_col = tgt_col - hyp_col
-                distances = np.sqrt((remaining_row ** 2).sum(axis=1) +
-                                    (remaining_col ** 2).sum(axis=1))
-                distances[~feasible] = np.inf
+            all_distances = np.append(distances, new_comm_dist)
+        else:
+            all_distances = np.array([new_comm_dist])
 
- 
-                # Temperature-based selection (same SA as probability mode)
-                temperature = 1.0 - (node_idx / total_nodes)
-                if temperature > 0.05:
-                    valid_mask = feasible
-                    n_valid = valid_mask.sum()
-                    if n_valid > 1:
-                        d = distances[valid_mask]
-                        scaled = -d / (temperature + 1e-10)
-                        scaled -= scaled.max()
-                        probs = np.exp(scaled)
-                        probs /= probs.sum()
-                        valid_indices = np.where(valid_mask)[0]
-                        best_community = np.random.choice(valid_indices, p=probs)
-                    else:
-                        best_community = np.where(valid_mask)[0][0]
-                else:
-                    best_community = np.argmin(distances)
+        # Temperature-based SA selection (matches Rust schedule)
+        temperature = 1.0 - (node_idx / total_nodes)
+        if temperature > 0.05:
+            valid_mask = np.isfinite(all_distances)
+            n_valid = valid_mask.sum()
+            if n_valid > 1:
+                d = all_distances[valid_mask]
+                scaled = -d / (temperature + 1e-10)
+                scaled -= scaled.max()
+                probs = np.exp(scaled)
+                probs /= probs.sum()
+                valid_indices = np.where(valid_mask)[0]
+                choice = int(np.random.choice(valid_indices, p=probs))
+            elif n_valid == 1:
+                choice = int(np.where(valid_mask)[0][0])
+            else:
+                choice = eval_count  # fallback: new community (matches Rust unwrap_or)
+        else:
+            finite_mask = np.isfinite(all_distances)
+            if finite_mask.any():
+                choice = int(np.argmin(np.where(finite_mask, all_distances, np.inf)))
+            else:
+                choice = eval_count  # fallback: new community
 
-        # If no feasible community, use a new empty one
-        if best_community is None:
+        # If the chosen index is beyond current active communities, create a new one
+        if choice >= num_active:
             if num_active >= comp.shape[0]:
-                # Grow arrays (rare)
                 extra = max(500, comp.shape[0] // 2)
                 comp = np.vstack([comp, np.zeros((extra, n_groups), dtype=np.float64)])
                 community_sizes = np.append(community_sizes, np.zeros(extra, dtype=np.int64))
             best_community = num_active
             num_active += 1
+        else:
+            best_community = choice
 
         # Update accumulated (only non-zero groups in this community)
         bc_comp = comp[best_community]
@@ -490,7 +294,7 @@ def refine_node_assignments(G, target, max_evals=5000):
 
     return G
 
-def populate_communities_capacity(G, num_communities, community_size_distribution='natural'):
+def populate_communities_capacity(G, num_communities, community_size_distribution='natural', new_comm_penalty=3.0):
     """
     Assign nodes to communities by matching absolute edge counts against
     maximum_num_links budget, with feasibility constraints ensuring
@@ -535,6 +339,15 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
     elif community_size_distribution == 'uniform':
         target_sizes = np.ones(num_communities) / num_communities
         target_counts = (target_sizes * total_nodes).astype(np.int32)
+    elif community_size_distribution == 'normal':
+        mean_size = total_nodes / num_communities
+        std_size = mean_size * 0.3   # 30% std → ~normal spread around the mean
+        raw = np.random.normal(mean_size, std_size, num_communities)
+        raw = np.maximum(raw, 1.0)   # no zero-size communities
+        # Scale so caps sum to total_nodes (communities collectively cover all nodes)
+        target_counts = np.maximum(
+            np.round(raw * (total_nodes / raw.sum())).astype(np.int32), 1
+        )
     else:
         target_counts = None
 
@@ -550,8 +363,7 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
     node_groups = np.array([G.nodes_to_group[n] for n in all_nodes])
 
     # Try Rust backend, fall back to Python
-    try:
-        import X
+    try:  
         from asnu_rust import process_nodes_capacity
         print("Using Rust backend for capacity-based node processing...")
 
@@ -565,6 +377,7 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
             num_communities,
             target_counts if target_counts is not None else None,
             total_nodes,
+            new_comm_penalty,
         )
 
         # Populate G structures from assignments
@@ -587,7 +400,7 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
 
         _process_nodes_capacity_python(
             G, all_nodes, node_groups, num_communities,
-            target, total_nodes, target_counts,
+            target, total_nodes, target_counts, new_comm_penalty,
         )
 
     print(f"\nCapacity-based community assignment complete: "
@@ -634,8 +447,6 @@ def connect_all_within_communities(G, verbose=True):
         if len(community_nodes) == 0:
             continue
 
-        # Use itertools.product to generate all pairs efficiently
-        # Filter out self-loops inline
         edges_to_add = [(src, dst) for src, dst in product(community_nodes, repeat=2)
                        if src != dst]
 
@@ -714,9 +525,47 @@ def fill_unfulfilled_group_pairs(G, reciprocity_p, verbose=True):
         print(f"  Fulfilled: {stats['fulfilled_pairs']}")
         print(f"  Unfulfilled: {stats['unfulfilled_pairs']}")
 
-    # Add random edges to complete unfulfilled pairs
-    partially_filled = 0
+    def _fill_from_pool(src_pool, dst_pool, src_id, dst_id, needed):
+        """Add up to `needed` edges by batch-sampling from src_pool/dst_pool."""
+        if not src_pool or not dst_pool or needed <= 0:
+            return
+        src_arr = np.array(src_pool)
+        dst_arr = np.array(dst_pool)
+        batch = max(needed * 4, 512)   # oversample to tolerate rejections
+
+        for _ in range(10):            # at most 10 numpy draws per pool
+            if G.existing_num_links[(src_id, dst_id)] >= maximum:
+                return
+            srcs = np.random.choice(src_arr, size=batch).tolist()
+            dsts = np.random.choice(dst_arr, size=batch).tolist()
+            added_this_round = 0
+            for s, d in zip(srcs, dsts):
+                if G.existing_num_links[(src_id, dst_id)] >= maximum:
+                    return
+                if s == d or G.graph.has_edge(s, d):
+                    continue
+                G.graph.add_edge(s, d)
+                G.existing_num_links[(src_id, dst_id)] += 1
+                stats['edges_added'] += 1
+                added_this_round += 1
+                if reciprocity_p > 0 and random.random() < reciprocity_p:
+                    if (G.existing_num_links[(dst_id, src_id)] < G.maximum_num_links[(dst_id, src_id)]
+                            and not G.graph.has_edge(d, s)):
+                        G.graph.add_edge(d, s)
+                        G.existing_num_links[(dst_id, src_id)] += 1
+                        stats['reciprocal_edges_added'] += 1
+                        if dst_id == src_id:
+                            stats['edges_added'] += 1
+            if added_this_round == 0:
+                return  # pool is saturated, stop early
+
+    # Add edges to complete unfulfilled pairs
+    total_needed = sum(max - ex for _, _, ex, max in unfulfilled_pairs)
     if unfulfilled_pairs:
+        pbar = (tqdm(total=total_needed, unit='edge', desc='Filling pairs', dynamic_ncols=True)
+                if tqdm and verbose else None)
+        edges_before = stats['edges_added']
+
         for src_id, dst_id, existing, maximum in unfulfilled_pairs:
             existing = G.existing_num_links.get((src_id, dst_id), 0)
             maximum = G.maximum_num_links.get((src_id, dst_id), 0)
@@ -727,33 +576,67 @@ def fill_unfulfilled_group_pairs(G, reciprocity_p, verbose=True):
             if not src_nodes or not dst_nodes:
                 continue
 
-            attempts = 0
-            max_attempts = needed * 20
-            edges_added_for_pair = 0
+            edges_before_pair = stats['edges_added']
 
-            while G.existing_num_links[(src_id, dst_id)] < maximum and attempts < max_attempts:
-                src_node = random.choice(src_nodes)
-                dst_node = random.choice(dst_nodes)
+            # --- Phase 1: intra-community pool ---
+            src_comm = {}
+            for node in src_nodes:
+                comm = G.nodes_to_communities.get(node)
+                if comm is not None:
+                    src_comm.setdefault(comm, []).append(node)
+            dst_comm = {}
+            for node in dst_nodes:
+                comm = G.nodes_to_communities.get(node)
+                if comm is not None:
+                    dst_comm.setdefault(comm, []).append(node)
 
-                # Add edge if valid (no self-loops, no duplicates)
-                if src_node != dst_node and not G.graph.has_edge(src_node, dst_node):
-                    G.graph.add_edge(src_node, dst_node)
-                    edges_added_for_pair += 1
-                    G.existing_num_links[(src_id, dst_id)] += 1
-                    stats['edges_added'] += 1
+            shared = list(set(src_comm) & set(dst_comm))
+            if shared:
+                # Build numpy arrays per community for fast sampling
+                src_arrs = [np.array(src_comm[c]) for c in shared]
+                dst_arrs = [np.array(dst_comm[c]) for c in shared]
+                # Weight community selection by pool size product
+                weights = np.array([len(s) * len(d) for s, d in zip(src_arrs, dst_arrs)], dtype=float)
+                weights /= weights.sum()
+                n_comm = len(shared)
+                batch = max((maximum - G.existing_num_links[(src_id, dst_id)]) * 4, 512)
+                for _ in range(10):
+                    if G.existing_num_links[(src_id, dst_id)] >= maximum:
+                        break
+                    # Sample community indices, then sample one node from each side
+                    comm_indices = np.random.choice(n_comm, size=batch, p=weights)
+                    added_this_round = 0
+                    for ci in comm_indices:
+                        if G.existing_num_links[(src_id, dst_id)] >= maximum:
+                            break
+                        s = src_arrs[ci][np.random.randint(len(src_arrs[ci]))]
+                        d = dst_arrs[ci][np.random.randint(len(dst_arrs[ci]))]
+                        if s == d or G.graph.has_edge(s, d):
+                            continue
+                        G.graph.add_edge(s, d)
+                        G.existing_num_links[(src_id, dst_id)] += 1
+                        stats['edges_added'] += 1
+                        added_this_round += 1
+                        if reciprocity_p > 0 and random.random() < reciprocity_p:
+                            if (G.existing_num_links[(dst_id, src_id)] < G.maximum_num_links[(dst_id, src_id)]
+                                    and not G.graph.has_edge(d, s)):
+                                G.graph.add_edge(d, s)
+                                G.existing_num_links[(dst_id, src_id)] += 1
+                                stats['reciprocal_edges_added'] += 1
+                                if dst_id == src_id:
+                                    stats['edges_added'] += 1
+                    if added_this_round == 0:
+                        break  # pools saturated
 
-                    # Reciprocity - same pattern as grn.py
-                    if random.uniform(0,1) < reciprocity_p:
-                        if( G.existing_num_links[(dst_id, src_id)] < G.maximum_num_links[(dst_id, src_id)] and
-                           not G.graph.has_edge(dst_node, src_node)):
-                            G.graph.add_edge(dst_node, src_node)
-                            G.existing_num_links[(dst_id, src_id)] += 1
-                            stats['reciprocal_edges_added'] += 1
-                            if (dst_id == src_id):
-                                edges_added_for_pair += 1
-                                stats['edges_added'] += 1
+            # # --- Phase 2: cross-community fallback ---
+            _fill_from_pool(src_nodes, dst_nodes, src_id, dst_id,
+                            needed=maximum - G.existing_num_links[(src_id, dst_id)])
 
-                attempts += 1
+            if pbar is not None:
+                pbar.update(stats['edges_added'] - edges_before_pair)
+
+        if pbar is not None:
+            pbar.close()
 
     if verbose:
         print(f"  Edges added: {stats['edges_added']}")
@@ -766,7 +649,7 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
                        output_path='communities.json', community_size_distribution='natural',
                        pop_column='n', src_suffix='_src', dst_suffix='_dst',
                        link_column='n', min_group_size=0, verbose=True,
-                       mode='probability'):
+                       new_comm_penalty=3.0):
     """
     Create community assignments and save them to a JSON file.
 
@@ -816,7 +699,7 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
 
     if verbose:
         print("="*60)
-        print(f"COMMUNITY CREATION (mode={mode})")
+        print(f"COMMUNITY CREATION (penalty={new_comm_penalty})")
         print("="*60)
 
     # Create a temporary graph and initialize nodes
@@ -831,21 +714,11 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
                                 dst_suffix=dst_suffix, link_column=link_column,
                                 verbose=verbose)
 
-    # Create community structure
-    if mode == 'capacity':
-        if number_of_communities is None:
-            number_of_communities = 100  # sensible default for capacity mode
-        if verbose:
-            print(f"\nCapacity-based assignment (initial {number_of_communities} communities)...")
-        populate_communities_capacity(G, number_of_communities,
-                                      community_size_distribution=community_size_distribution)
-    else:
-        if number_of_communities is None:
-            raise ValueError("number_of_communities is required for mode='probability'")
-        if verbose:
-            print(f"\nAssigning nodes to {number_of_communities} communities...")
-        populate_communities(G, number_of_communities,
-                             community_size_distribution=community_size_distribution)
+    if verbose:
+        print(f"\nAssigning nodes (penalty={new_comm_penalty}, initial communities={number_of_communities})...")
+    populate_communities_capacity(G, number_of_communities,
+                                  community_size_distribution=community_size_distribution,
+                                  new_comm_penalty=new_comm_penalty)
 
     # Serialize to JSON (convert numpy types to native Python types)
     data = {
