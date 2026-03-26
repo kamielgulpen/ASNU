@@ -24,8 +24,8 @@ from contagion_experiment import ContagionSimulator, load_networks
 @dataclass
 class SimulationConfig:
     """Simulation parameters."""
-    n_simulations: int = 50
-    max_steps: int = 50
+    n_simulations: int = 200
+    max_steps: int = 10000
     threshold_type: str = 'fractional'
     initial_infected_fraction: float = 0.01
     min_threshold: float = 0.05
@@ -41,11 +41,11 @@ class SimulationConfig:
 class NetworkConfig:
     """Network parameters."""
     base_folder: str = "Data/networks/werkschool"
-    scale: float = 0.1
+    scale: float = 0.01
     reciprocity: int = 1
     transitivity: int = 0
     bridge: float = 0.2
-    n_communities_range: Tuple[float, float, int] = (1, 1000, 10)
+    n_communities_range: Tuple[float, float, int] = (1, 100, 10)
     preferential_attachment_range: Tuple[float, float, int] = (0, 0.99, 10)
     
     def folder_path(self, n_comms: float, pref_att: float) -> str:
@@ -377,18 +377,18 @@ class ContagionAnalyzer:
         
         try:
             # Load only needed networks
-            network_graphs = load_networks(str(folder), add_random=False)
+            characteristic_groups = [
+                                     "geslacht_lft", 
+                                     "etngrp", "lft", 
+                                     "etngrp_geslacht_lft_oplniv", 
+                                     "etngrp_geslacht_lft", 
+                                     "geslacht"
+                                     ]
+            network_graphs = load_networks(str(folder), files = None,add_random=False)
 
             
-            characteristic_groups = ["geslacht_lft", "etngrp", "lft", "etngrp_geslacht_lft_oplniv", "etngrp_geslacht_lft", "geslacht"]
-            
-            # Extract only the graphs we need
             networks = {key: network_graphs[key].graph 
-                       for key in network_graphs 
-                       if key in characteristic_groups}
-            
-            # networks = {key: network_graphs[key].graph 
-            #            for key in network_graphs}
+                       for key in network_graphs}
             
             # Run simulations
             contested_results, ratios = self._sweep_contested(networks)

@@ -36,7 +36,7 @@ def nx_to_igraph(nx_graph):
 
 
 # Generation parameters
-scale = 0.1
+scale = 0.001
 
 number_of_communities = 1
 preferential_attachment = 0
@@ -47,7 +47,7 @@ bridge_probability = 0.2
 
 for preferential_attachment in np.linspace(0,0.99,10):
     print(preferential_attachment/1)
-    for number_of_communities in np.linspace(1,1000,10):
+    for number_of_communities in np.linspace(1,10,10):
         params = (f"scale={scale}_comms={number_of_communities}"
                 f"_recip={reciprocity_p}_trans={transitivity_p}"
                 f"_pa={preferential_attachment}_bridge={bridge_probability}")
@@ -109,13 +109,13 @@ for preferential_attachment in np.linspace(0,0.99,10):
 
 
                 # Save network: Data/networks/<params>/<characteristics>.pkl
-                output_dir = f'Data/networks/{layer}/{params}'
+                output_dir = f'networks/{layer}/{params}'
                 os.makedirs(output_dir, exist_ok=True)
                 filename = f'{output_dir}/{characteristics_string}.pkl'
                 with open(filename, 'wb') as f:
                     pickle.dump(graph, f)
                 print(f"Saved to {filename}")
                 os.makedirs(f"{output_dir}/node_distribution", exist_ok=True)
-                plt.savefig(f'Data/networks/{layer}/{params}/node_distribution/{characteristics_string}.png', dpi=300, bbox_inches='tight')
+                plt.savefig(f'networks/{layer}/{params}/node_distribution/{characteristics_string}.png', dpi=300, bbox_inches='tight')
                 plt.close()
 

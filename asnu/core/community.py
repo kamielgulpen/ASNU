@@ -22,6 +22,7 @@ import random
 from collections import Counter
 from itertools import product
 from tqdm import tqdm
+from asnu_rust import process_nodes_capacity
 
 import numpy as np
 
@@ -364,7 +365,6 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
 
     # Try Rust backend, fall back to Python
     try:  
-        from asnu_rust import process_nodes_capacity
         print("Using Rust backend for capacity-based node processing...")
 
         budget = {(int(k[0]), int(k[1])): int(v) for k, v in G.maximum_num_links.items()}
