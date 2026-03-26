@@ -77,7 +77,7 @@ fn run_edge_creation(
         let dst_id = *dst_id;
         let target_link_count = *target_link_count;
 
-        if (pair_idx + 1) % 500 == 0 || pair_idx == 0 || pair_idx == total_pairs - 1 {
+        if (pair_idx + 1) % 5000 == 0 || pair_idx == 0 || pair_idx == total_pairs - 1 {
             println!("Processing pair {} of {}", pair_idx + 1, total_pairs);
         }
 
@@ -297,7 +297,7 @@ fn run_edge_creation(
 ///
 /// Optimized: flat 2D arrays, only evaluates active (non-empty) communities.
 #[pyfunction]
-#[pyo3(signature = (all_nodes, node_groups, budget, n_groups, initial_num_communities, target_counts=None, total_nodes=0, new_comm_penalty=3.0))]
+#[pyo3(signature = (all_nodes, node_groups, budget, n_groups, initial_num_communities, target_counts=None, total_nodes=0, new_comm_penalty=3.0, initial_comp=None))]
 fn process_nodes_capacity<'py>(
     py: Python<'py>,
     all_nodes: PyReadonlyArray1<'py, i64>,
@@ -308,6 +308,7 @@ fn process_nodes_capacity<'py>(
     target_counts: Option<PyReadonlyArray1<'py, i32>>,
     total_nodes: usize,
     new_comm_penalty: f64,
+    initial_comp: Option<HashMap<usize, HashMap<usize, i64>>>,
 ) -> PyResult<Bound<'py, PyArray1<i64>>> {
     let _all_nodes = all_nodes.as_array();
     let node_groups = node_groups.as_array();
@@ -322,8 +323,23 @@ fn process_nodes_capacity<'py>(
     // Flat 2D array for community composition: comp[c * n_groups + h] = count
     let mut comp: Vec<i64> = vec![0; max_communities * n_groups];
     let mut community_sizes: Vec<i64> = vec![0; max_communities];
-    let mut num_active: usize = 0; // Only iterate up to this index
+    let mut num_active: usize = initial_num_communities; // Only iterate up to this index
     let mut capacity: usize = max_communities;
+
+    // Initialize from pre-seeded communities (each seed is in its own community)
+    if let Some(ref ic) = initial_comp {
+        for (&comm_id, comp_dict) in ic {
+            if comm_id < capacity {
+                for (&group_id, &count) in comp_dict {
+                    if group_id < n_groups {
+                        comp[comm_id * n_groups + group_id] += count;
+                        community_sizes[comm_id] += count;
+                    }
+                }
+            }
+        }
+        // acc stays zero — each seed is alone in its own community (no intra-community pairs yet)
+    }
 
     // Flat 2D array for accumulated edge counts: acc[g * n_groups + h]
     let mut acc: Vec<i64> = vec![0; n_groups * n_groups];
@@ -539,10 +555,244 @@ fn process_nodes_capacity<'py>(
 }
 
 
+/// Sparse simulated annealing for large group counts.
+///
+/// Replaces the two O(n_groups²) flat arrays in `process_nodes_capacity` with
+/// sparse HashMaps, reducing memory from ~39 GB to O(nnz + n_nodes).
+///
+/// For K average non-zero target neighbours per group and C active communities
+/// the inner loop is O(K·C) per node instead of O(n_groups·C).
+///
+/// Drop-in compatible: same signature and return type as `process_nodes_capacity`.
+#[pyfunction]
+#[pyo3(signature = (all_nodes, node_groups, budget, n_groups, initial_num_communities, target_counts=None, total_nodes=0, new_comm_penalty=3.0, initial_comp=None))]
+fn process_nodes_capacity_sparse<'py>(
+    py: Python<'py>,
+    all_nodes: PyReadonlyArray1<'py, i64>,
+    node_groups: PyReadonlyArray1<'py, i64>,
+    budget: HashMap<(i64, i64), i64>,
+    n_groups: usize,
+    initial_num_communities: usize,
+    target_counts: Option<PyReadonlyArray1<'py, i32>>,
+    total_nodes: usize,
+    new_comm_penalty: f64,
+    initial_comp: Option<HashMap<usize, HashMap<usize, i64>>>,
+) -> PyResult<Bound<'py, PyArray1<i64>>> {
+    let _ = all_nodes; // caller already shuffled all_nodes/node_groups in Python
+    let node_groups_arr = node_groups.as_array();
+    let tc: Option<Array1<i32>> = target_counts.map(|t| t.as_array().to_owned());
+
+    let mut rng = thread_rng();
+
+    // ── Sparse neighbour lists built from budget (O(nnz)) ─────────────────
+    // nbrs_row[g] = [(h, target[g,h]), ...] — groups g sends interactions toward
+    // nbrs_col[g] = [(h, target[h,g]), ...] — groups that send toward g (h ≠ g)
+    let mut nbrs_row: Vec<Vec<(usize, i64)>> = vec![Vec::new(); n_groups];
+    let mut nbrs_col: Vec<Vec<(usize, i64)>> = vec![Vec::new(); n_groups];
+    for (&(sg, dg), &val) in &budget {
+        if val <= 0 { continue; }
+        let sg = sg as usize;
+        let dg = dg as usize;
+        if sg < n_groups && dg < n_groups {
+            nbrs_row[sg].push((dg, val));
+            if sg != dg {
+                nbrs_col[dg].push((sg, val));
+            }
+        }
+    }
+
+    // ── Community composition: comp_by_comm[c][h] = count ────────────────
+    let mut cap = initial_num_communities + initial_num_communities / 4 + 10;
+    let mut comp_by_comm: Vec<HashMap<usize, i64>> = (0..cap).map(|_| HashMap::new()).collect();
+    let mut comm_sizes: Vec<i64> = vec![0i64; cap];
+    let mut num_active: usize = 0;
+
+    // Initialize from pre-seeded communities (each seed is alone in its own community)
+    if let Some(ref ic) = initial_comp {
+        for (&comm_id, comp_dict) in ic {
+            if comm_id < cap {
+                for (&group_id, &count) in comp_dict {
+                    if group_id < n_groups {
+                        *comp_by_comm[comm_id].entry(group_id).or_insert(0) += count;
+                        comm_sizes[comm_id] += count;
+                    }
+                }
+            }
+        }
+        num_active = ic.len();
+        // acc_sym stays zero — seeds are each in their own community, no pairs yet
+    }
+
+    // ── Accumulated co-location counts: acc_sym[g][h] (symmetric) ────────
+    // acc_sym[g][h] == acc_sym[h][g] = times g and h were in the same community
+    let mut acc_sym: Vec<HashMap<usize, i64>> = (0..n_groups).map(|_| HashMap::new()).collect();
+
+    // Reusable distance buffer (+1 for the new-community candidate slot)
+    let mut distances: Vec<f64> = vec![0.0; cap + 1];
+
+    #[inline(always)]
+    fn cost(x: f64) -> f64 {
+        const OVERSHOOT: f64 = 10.0;
+        if x >= 0.0 { x * x } else { OVERSHOOT * x * x }
+    }
+
+    let mut assignments: Vec<i64> = Vec::with_capacity(total_nodes);
+
+    for node_idx in 0..total_nodes {
+        let g = node_groups_arr[node_idx] as usize;
+
+        // ── Base distance: placing g in a new empty community ─────────────
+        let base: f64 = {
+            let g_acc = &acc_sym[g];
+            let mut d = 0.0f64;
+            for &(h, tv) in &nbrs_row[g] {
+                let av = *g_acc.get(&h).unwrap_or(&0) as f64;
+                d += cost(tv as f64 - av);
+            }
+            for &(h, tv) in &nbrs_col[g] {
+                let av = *g_acc.get(&h).unwrap_or(&0) as f64;
+                d += cost(tv as f64 - av);
+            }
+            d
+        };
+        let new_dist = new_comm_penalty * base.sqrt();
+
+        // Grow buffer if num_active has outpaced it
+        if distances.len() <= num_active {
+            distances.resize(num_active + 2, 0.0);
+        }
+
+        // ── Delta for each existing community ─────────────────────────────
+        // Only interaction neighbours of g contribute non-zero delta terms.
+        for c in 0..num_active {
+            if let Some(ref tc) = tc {
+                if c < tc.len() && comm_sizes[c] as i32 >= tc[c] {
+                    distances[c] = f64::INFINITY;
+                    continue;
+                }
+            }
+
+            let c_comp = &comp_by_comm[c];
+            let g_acc  = &acc_sym[g];
+            let mut delta = 0.0f64;
+
+            for &(h, tv) in &nbrs_row[g] {
+                let count_h = *c_comp.get(&h).unwrap_or(&0);
+                if count_h == 0 { continue; }
+                let av  = *g_acc.get(&h).unwrap_or(&0) as f64;
+                let tv  = tv as f64;
+                let old = cost(tv - av);
+                if h == g {
+                    // Diagonal: convention uses 2×count (matches dense SA)
+                    delta += cost(tv - av - 2.0 * count_h as f64) - old;
+                } else {
+                    delta += cost(tv - av - count_h as f64) - old;
+                }
+            }
+            for &(h, tv) in &nbrs_col[g] {   // h != g by construction
+                let count_h = *c_comp.get(&h).unwrap_or(&0);
+                if count_h == 0 { continue; }
+                let av  = *g_acc.get(&h).unwrap_or(&0) as f64;
+                let tv  = tv as f64;
+                delta += cost(tv - av - count_h as f64) - cost(tv - av);
+            }
+
+            distances[c] = base + delta;
+        }
+        distances[num_active] = new_dist;
+
+        // ── SA temperature-based selection ────────────────────────────────
+        let temperature = 1.0 - (node_idx as f64 / total_nodes as f64);
+
+        let chosen = if temperature > 0.05 {
+            let valid: Vec<usize> = (0..=num_active)
+                .filter(|&c| distances[c].is_finite())
+                .collect();
+
+            if valid.len() > 1 {
+                let max_neg = valid.iter()
+                    .map(|&c| -distances[c] / (temperature + 1e-10))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let weights: Vec<f64> = valid.iter()
+                    .map(|&c| ((-distances[c] / (temperature + 1e-10)) - max_neg).exp())
+                    .collect();
+                let dist = WeightedIndex::new(&weights).unwrap();
+                valid[dist.sample(&mut rng)]
+            } else if valid.len() == 1 {
+                valid[0]
+            } else {
+                num_active  // fallback: new community
+            }
+        } else {
+            (0..=num_active)
+                .filter(|&c| distances[c].is_finite())
+                .min_by(|&a, &b| distances[a].partial_cmp(&distances[b]).unwrap())
+                .unwrap_or(num_active)
+        };
+
+        // ── Create new community if buffer needs to grow ──────────────────
+        let best_comm = if chosen >= num_active {
+            let idx = num_active;
+            if idx >= cap {
+                let extra = cap / 2 + 50;
+                comp_by_comm.extend((0..extra).map(|_| HashMap::new()));
+                comm_sizes.resize(cap + extra, 0);
+                distances.resize(cap + extra + 1, 0.0);
+                cap += extra;
+            }
+            num_active += 1;
+            idx
+        } else {
+            chosen
+        };
+
+        // ── Update acc_sym (collect first to avoid simultaneous borrows) ──
+        {
+            let updates: Vec<(usize, i64)> = comp_by_comm[best_comm]
+                .iter()
+                .map(|(&h, &cnt)| (h, cnt))
+                .collect();
+            for (h, cnt) in updates {
+                if h != g {
+                    *acc_sym[g].entry(h).or_insert(0) += cnt;
+                    *acc_sym[h].entry(g).or_insert(0) += cnt;
+                } else {
+                    *acc_sym[g].entry(g).or_insert(0) += 2 * cnt;
+                }
+            }
+        }
+
+        // ── Update composition and record assignment ──────────────────────
+        *comp_by_comm[best_comm].entry(g).or_insert(0) += 1;
+        comm_sizes[best_comm] += 1;
+        assignments.push(best_comm as i64);
+
+        if (node_idx + 1) % 5000 == 0 {
+            println!(
+                "Sparse SA: {}/{} nodes ({:.1}%), {} active communities",
+                node_idx + 1,
+                total_nodes,
+                100.0 * (node_idx + 1) as f64 / total_nodes as f64,
+                num_active
+            );
+        }
+    }
+
+    println!(
+        "Sparse SA complete: {} nodes -> {} active communities",
+        total_nodes, num_active
+    );
+
+    let result = Array1::from(assignments);
+    Ok(PyArray1::from_owned_array_bound(py, result))
+}
+
+
 /// Python module
 #[pymodule]
 fn asnu_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_edge_creation, m)?)?;
     m.add_function(wrap_pyfunction!(process_nodes_capacity, m)?)?;
+    m.add_function(wrap_pyfunction!(process_nodes_capacity_sparse, m)?)?;
     Ok(())
 }

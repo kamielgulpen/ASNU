@@ -51,21 +51,44 @@ def build_group_pair_to_communities_lookup(G, verbose=False):
     if verbose:
         print("Building community lookup for group pairs...")
 
-    group_pair_to_communities = {}
+    # Fast path: single community — every group pair maps to [0]; use a
+    # defaultdict to avoid O(n_groups^2) pre-allocation.
+    if G.number_of_communities == 1:
+        from collections import defaultdict as _dd
 
+        class _SingleCommLookup(_dd):
+            """Lazy defaultdict that returns [0] for every missing key."""
+            def __missing__(self, key):
+                return [0]
+
+        if verbose:
+            print("  Single community: using lazy lookup (skipping O(n^2) build)")
+        return _SingleCommLookup(list)
+
+    # Build group → set-of-communities map.
+    # A group can appear in multiple communities when the SA splits a large group
+    # across many small communities (e.g. low new_comm_penalty on large populations).
+    from collections import defaultdict as _dd
+    group_to_comms = _dd(list)
     for community_id in range(G.number_of_communities):
-        groups_in_community = G.communities_to_groups.get(community_id, [])
-        for src_id in groups_in_community:
-            for dst_id in groups_in_community:
-                pair_key = (src_id, dst_id)
+        for g in G.communities_to_groups.get(community_id, []):
+            group_to_comms[g].append(community_id)
 
-                if pair_key not in group_pair_to_communities:
-                    group_pair_to_communities[pair_key] = []
-
-                group_pair_to_communities[pair_key].append(community_id)
+    # Build pair → shared-communities only for pairs that have interactions.
+    # Using max_links as the filter avoids the O(groups_per_community²) Cartesian product
+    # that was infeasible for large group counts (70k groups → 487M pairs).
+    group_pair_to_communities = {}
+    for (src_id, dst_id) in G.maximum_num_links:
+        sc = group_to_comms.get(src_id)
+        dc = group_to_comms.get(dst_id)
+        if not sc or not dc:
+            continue
+        shared = list(set(sc) & set(dc))
+        if shared:
+            group_pair_to_communities[(src_id, dst_id)] = shared
 
     if verbose:
-        avg_communities = np.mean([len(v) for v in group_pair_to_communities.values()])
+        avg_communities = np.mean([len(v) for v in group_pair_to_communities.values()]) if group_pair_to_communities else 0
         print(f"  Found {len(group_pair_to_communities)} group pairs")
         print(f"  Average communities per pair: {avg_communities:.1f}")
 
@@ -81,7 +104,8 @@ def populate_communities(G, num_communities, community_size_distribution='natura
     )
 
 def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
-                                   target, total_nodes, target_counts, new_comm_penalty):
+                                   target, total_nodes, target_counts, new_comm_penalty,
+                                   initial_comp=None):
     """Pure-Python fallback for capacity-based node assignment using matrix ops.
 
     Optimized: only evaluates non-empty communities, avoids matrix copies,
@@ -90,6 +114,13 @@ def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
     Uses soft penalty for budget overshoot (instead of hard feasibility rejection)
     and always includes a new empty community as a candidate, so communities are
     only created when that genuinely minimises the remaining edge-budget distance.
+
+    Parameters
+    ----------
+    initial_comp : list of dict, optional
+        Pre-seeded compositions: initial_comp[i] = {group_id: count}.
+        Communities 0..len(initial_comp)-1 are pre-populated; seed nodes must
+        be excluded from all_nodes before calling this function.
     """
     OVERSHOOT_PENALTY = 10.0
 
@@ -99,14 +130,47 @@ def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
     capacity = num_communities + num_communities // 20
     comp = np.zeros((capacity, n_groups), dtype=np.float64)
     community_sizes = np.zeros(capacity, dtype=np.int64)
-    num_active = 0  # number of communities actually in use
+    num_active = num_communities  # number of communities actually in use
 
-    # Global accumulated edge reservations: (n_groups, n_groups)
-    accumulated = np.zeros((n_groups, n_groups), dtype=np.float64)
+    # Initialise composition from pre-seeded communities (acc stays zero —
+    # each seed is alone in its own community so no intra-community pairs yet)
+    if initial_comp:
+        for comm_id, comp_dict in enumerate(initial_comp):
+            for group_id, count in comp_dict.items():
+                comp[comm_id, int(group_id)] += count
+                community_sizes[comm_id] += count
 
-    # Pre-compute target rows/cols for each group (avoids repeated indexing)
-    target_rows = [target[g, :].copy() for g in range(n_groups)]
-    target_cols = [target[:, g].copy() for g in range(n_groups)]
+    # Sparse accumulated: only non-zero (g, h) entries stored
+    from collections import defaultdict as _dd
+    _acc = _dd(float)  # keys: (g, h) → count
+
+    # Target rows/cols accessed on demand (avoid 2×n_groups² pre-allocation)
+    _tgt_row_cache: dict = {}
+    _tgt_col_cache: dict = {}
+
+    def _get_tgt_row(g):
+        if g not in _tgt_row_cache:
+            _tgt_row_cache[g] = target[g, :].copy()
+        return _tgt_row_cache[g]
+
+    def _get_tgt_col(g):
+        if g not in _tgt_col_cache:
+            _tgt_col_cache[g] = target[:, g].copy()
+        return _tgt_col_cache[g]
+
+    def _get_acc_row(g):
+        row = np.zeros(n_groups, dtype=np.float64)
+        for (gi, hi), v in _acc.items():
+            if gi == g:
+                row[hi] = v
+        return row
+
+    def _get_acc_col(g):
+        col = np.zeros(n_groups, dtype=np.float64)
+        for (gi, hi), v in _acc.items():
+            if hi == g:
+                col[gi] = v
+        return col
 
     random.shuffle(all_nodes)
 
@@ -114,10 +178,10 @@ def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
         node = all_nodes[node_idx]
         g = node_groups[node_idx]
 
-        tgt_row = target_rows[g]
-        tgt_col = target_cols[g]
-        acc_row_g = accumulated[g, :]
-        acc_col_g = accumulated[:, g]
+        tgt_row = _get_tgt_row(g)
+        tgt_col = _get_tgt_col(g)
+        acc_row_g = _get_acc_row(g)
+        acc_col_g = _get_acc_col(g)
 
         # Baseline distance: zero-count contribution for all groups h
         # rem_row[h] = tgt_row[h] - acc_row[g,h],  rem_col[h] = tgt_col[h] - acc_col[h,g]
@@ -202,16 +266,16 @@ def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
         else:
             best_community = choice
 
-        # Update accumulated (only non-zero groups in this community)
+        # Update sparse accumulated (only non-zero groups in this community)
         bc_comp = comp[best_community]
         nz_groups = np.nonzero(bc_comp)[0]
         for h in nz_groups:
-            count_h = bc_comp[h]
+            count_h = float(bc_comp[h])
             if h != g:
-                accumulated[g, h] += count_h
-                accumulated[h, g] += count_h
+                _acc[(g, h)] = _acc.get((g, h), 0.0) + count_h
+                _acc[(h, g)] = _acc.get((h, g), 0.0) + count_h
             else:
-                accumulated[g, g] += 2 * count_h
+                _acc[(g, g)] = _acc.get((g, g), 0.0) + 2 * count_h
 
         # Update community composition
         comp[best_community, g] += 1
@@ -232,68 +296,96 @@ def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
                   f"({100*(node_idx+1)/total_nodes:.1f}%), {num_active} communities")
 
     G.number_of_communities = num_active
-    # refine_node_assignments(G, target)
 
-def refine_node_assignments(G, target, max_evals=5000):
+
+def find_separated_groups(G, num_communities):
     """
-    Refines node assignments by moving nodes between communities to 
-    minimize the global Mean Squared Error against the target.
+    Select groups with minimal mutual interaction for community seeding.
+
+    Uses greedy farthest-point selection: starts with the group that has the
+    lowest total interaction, then repeatedly picks the group with the least
+    accumulated interaction toward already-selected groups.
+
+    Parameters
+    ----------
+    G : NetworkXGraph
+        Graph with group_ids, group_to_nodes, and maximum_num_links populated.
+    num_communities : int
+        Number of (group, node) seed pairs to return.
+
+    Returns
+    -------
+    list of (group_id, node_id)
+        One seed per community, chosen from the most mutually isolated groups.
     """
+    # Only consider groups that have at least one node
+    groups_with_nodes = [g for g in G.group_ids if G.group_to_nodes.get(g)]
+    if not groups_with_nodes:
+        return []
 
-    n_groups = target.shape[0]
-    # 1. Build initial community composition matrix
-    max_comm = max(G.nodes_to_communities.values()) + 1
-    comp = np.zeros((max_comm, n_groups))
-    for node, comm in G.nodes_to_communities.items():
-        g = G.nodes_to_group[node] # Assuming G stores the node's group
-        comp[comm, g] += 1
+    # Total interaction per group (sum of all outgoing + incoming links)
+    group_totals = {}
+    for (g, h), count in G.maximum_num_links.items():
+        group_totals[g] = group_totals.get(g, 0) + count
+        group_totals[h] = group_totals.get(h, 0) + count
 
-    def get_global_error(composition):
-        # Calculates global group-to-group counts
-        # Error = sum( (Target - sum_over_communities(C_g * C_h)) ^ 2 )
-        current_acc = np.zeros((n_groups, n_groups))
-        for c in range(len(composition)):
-            c_vec = composition[c].reshape(-1, 1)
-            # Outer product represents all pairs in the community
-            comm_edges = np.dot(c_vec, c_vec.T)
-            # Diagonal adjustment: internal edges are counted differently in the original code
-            np.fill_diagonal(comm_edges, composition[c] * (composition[c] - 1))
-            current_acc += comm_edges
-        return np.sum((target - current_acc) ** 2)
+    # interaction_sum[g] = total interaction between g and all already-selected groups
+    interaction_sum = {g: 0 for g in groups_with_nodes}
+    selected_groups = set()
+    used_nodes = set()
+    selected = []  # list of (group_id, node_id)
 
-    current_error = get_global_error(comp)
-    nodes = list(G.nodes_to_communities.keys())
-    u_s = random.choices(nodes, k=max_evals)
-    new_comms = random.choices([i for i in range(max_comm)], k=max_evals)
-    for i in range(max_evals):
-        # Pick a random node and a potential new community
-        u = u_s[i]
-        old_comm = G.nodes_to_communities[u]
-        new_comm = new_comms[i]
-        
-        if old_comm == new_comm: continue
-        
-        g = G.nodes_to_group[u]
-        
-        # Simulate Move
-        comp[old_comm, g] -= 1
-        comp[new_comm, g] += 1
-        
-        new_error = get_global_error(comp)
-        
-        if new_error < current_error:
-            # Keep the move
-            current_error = new_error
-            G.nodes_to_communities[u] = new_comm
+    n_target = min(num_communities, len(groups_with_nodes))
+
+    for _ in range(n_target):
+        if not selected:
+            # First seed: group with the lowest total interaction (most isolated)
+            best_group = min(groups_with_nodes, key=lambda g: group_totals.get(g, 0))
         else:
-            # Revert the move
-            comp[old_comm, g] += 1
-            comp[new_comm, g] -= 1
+            best_group = min(
+                (g for g in groups_with_nodes if g not in selected_groups),
+                key=lambda g: interaction_sum[g],
+                default=None,
+            )
+        if best_group is None:
+            break
 
-        if i % 100 == 0:
-            print(f"Refinement Iteration {i}: Global Error = {current_error:.2f}")
+        # Pick a node from this group not already used as a seed
+        candidates = [n for n in G.group_to_nodes[best_group] if n not in used_nodes]
+        if not candidates:
+            selected_groups.add(best_group)  # mark exhausted; skip in future iterations
+            continue
 
-    return G
+        node = random.choice(candidates)
+        selected.append((best_group, node))
+        selected_groups.add(best_group)
+        used_nodes.add(node)
+
+        # Update interaction sums: other groups now accumulate interaction toward best_group
+        for g in groups_with_nodes:
+            if g not in selected_groups:
+                interaction_sum[g] += (
+                    G.maximum_num_links.get((g, best_group), 0) +
+                    G.maximum_num_links.get((best_group, g), 0)
+                )
+
+    # If more seeds are needed than unique groups, fill from least-interactive nodes
+    while len(selected) < num_communities:
+        candidates = [
+            (g, n)
+            for g in groups_with_nodes
+            for n in G.group_to_nodes[g]
+            if n not in used_nodes
+        ]
+        if not candidates:
+            break
+        candidates.sort(key=lambda gn: group_totals.get(gn[0], 0))
+        best_group, node = candidates[0]
+        selected.append((best_group, node))
+        used_nodes.add(node)
+
+    return selected
+
 
 def populate_communities_capacity(G, num_communities, community_size_distribution='natural', new_comm_penalty=3.0):
     """
@@ -316,16 +408,6 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
     total_nodes = len(list(G.graph.nodes))
     n_groups = int(len(G.group_ids))
 
-    # Build target matrix from maximum_num_links
-    target = np.zeros((n_groups, n_groups), dtype=np.float64)
-    for (i, j), count in G.maximum_num_links.items():
-        target[i, j] = count
-
-    # Compute probability matrix (needed for JSON serialization / load_communities)
-    epsilon = 1e-5
-    row_sums = target.sum(axis=1, keepdims=True)
-    row_sums[row_sums == 0] = epsilon
-    G.probability_matrix = target / row_sums
     G.number_of_communities = num_communities
 
     # Target community sizes
@@ -342,69 +424,118 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
         target_counts = (target_sizes * total_nodes).astype(np.int32)
     elif community_size_distribution == 'normal':
         mean_size = total_nodes / num_communities
-        std_size = mean_size * 0.3   # 30% std → ~normal spread around the mean
+        std_size = mean_size * 0.3
         raw = np.random.normal(mean_size, std_size, num_communities)
-        raw = np.maximum(raw, 1.0)   # no zero-size communities
-        # Scale so caps sum to total_nodes (communities collectively cover all nodes)
+        raw = np.maximum(raw, 1.0)
         target_counts = np.maximum(
             np.round(raw * (total_nodes / raw.sum())).astype(np.int32), 1
         )
     else:
         target_counts = None
 
-    # Initialize community structures
-    for community_idx in range(num_communities):
-        for group_id in range(n_groups):
-            G.communities_to_nodes[(community_idx, group_id)] = []
-        G.communities_to_groups[community_idx] = []
+    # Fast path: single community — skip SA and all matrix allocations
+    if num_communities == 1 and target_counts is None:
+        all_nodes_fp = np.array(list(G.graph.nodes))
+        for node in all_nodes_fp:
+            group = G.nodes_to_group[node]
+            G.communities_to_nodes.setdefault((0, group), []).append(int(node))
+            G.nodes_to_communities[int(node)] = 0
+            if 0 not in G.communities_to_groups:
+                G.communities_to_groups[0] = []
+            G.communities_to_groups[0].append(group)
+        G.number_of_communities = 1
+        G.probability_matrix = np.zeros((0, 0))  # empty placeholder; matrix not needed for 1 community
+        print(f"\nCapacity-based community assignment complete: "
+              f"{total_nodes} nodes -> 1 community (fast path)")
+        return
 
-    # Shuffle nodes
+    # Build target matrix from maximum_num_links (sparse construction)
+    from scipy.sparse import csr_matrix as _csr_mat
+    if G.maximum_num_links:
+        _ri, _ci, _vi = zip(*[(i, j, v) for (i, j), v in G.maximum_num_links.items() if v > 0]) or ([], [], [])
+    else:
+        _ri, _ci, _vi = [], [], []
+    target_sp = _csr_mat((list(_vi), (list(_ri), list(_ci))), shape=(n_groups, n_groups), dtype=np.float64) if _vi else _csr_mat((n_groups, n_groups), dtype=np.float64)
+
+    epsilon = 1e-5
+    row_sums = np.asarray(target_sp.sum(axis=1)).flatten() + epsilon
+    target = np.asarray(target_sp.multiply(1.0 / row_sums[:, np.newaxis]).todense())
+    G.probability_matrix = target
+
+    # Build all_nodes and shuffle for pre-seeding
     all_nodes = np.array(list(G.graph.nodes))
     np.random.shuffle(all_nodes)
     node_groups = np.array([G.nodes_to_group[n] for n in all_nodes])
 
+    # --- Pre-seed communities from least-interacting groups ---
+    # find_separated_groups selects num_communities groups with minimal mutual
+    # interaction; one node per group seeds each community before the SA starts.
+    seeds = find_separated_groups(G, num_communities)
+    seed_node_set = {node for _, node in seeds}
+
+    initial_comp = []
+    for comm_id, (group, node) in enumerate(seeds):
+        G.communities_to_nodes.setdefault((comm_id, group), []).append(node)
+        G.nodes_to_communities[node] = comm_id
+        G.communities_to_groups.setdefault(comm_id, []).append(group)
+        initial_comp.append({group: 1})
+
+    # Remove seed nodes from the SA input
+    mask = np.array([int(n) not in seed_node_set for n in all_nodes])
+    sa_nodes = all_nodes[mask]
+    sa_groups = node_groups[mask]
+    sa_total_nodes = len(sa_nodes)  # SA backends must use this, not total_nodes
+    print(f"  Pre-seeded {len(seeds)} communities from least-interacting groups; "
+          f"{sa_total_nodes} nodes remaining for SA")
+
+    # Pre-initialise community structures (use setdefault to preserve any seed assignments)
+    for community_idx in range(num_communities):
+        for group_id in range(n_groups):
+            G.communities_to_nodes.setdefault((community_idx, group_id), [])
+        G.communities_to_groups.setdefault(community_idx, [])
+
     # Try Rust backend, fall back to Python
-    try:  
+    try:
+        from asnu_rust import process_nodes_capacity
         print("Using Rust backend for capacity-based node processing...")
 
         budget = {(int(k[0]), int(k[1])): int(v) for k, v in G.maximum_num_links.items()}
+        rust_initial_comp = {comm_id: {int(g): int(c) for g, c in d.items()}
+                             for comm_id, d in enumerate(initial_comp)}
 
         assignments = process_nodes_capacity(
-            all_nodes.astype(np.int64),
-            node_groups.astype(np.int64),
+            sa_nodes.astype(np.int64),
+            sa_groups.astype(np.int64),
             budget,
             n_groups,
             num_communities,
             target_counts if target_counts is not None else None,
-            total_nodes,
+            sa_total_nodes,
             new_comm_penalty,
+            rust_initial_comp if initial_comp else None,
         )
 
         # Populate G structures from assignments
-        for i in range(len(all_nodes)):
-            node = int(all_nodes[i])
+        for i in range(len(sa_nodes)):
+            node = int(sa_nodes[i])
             comm = int(assignments[i])
-            group = int(node_groups[i])
-            key = (comm, group)
-            if key not in G.communities_to_nodes:
-                G.communities_to_nodes[key] = []
-            G.communities_to_nodes[key].append(node)
+            group = int(sa_groups[i])
+            G.communities_to_nodes.setdefault((comm, group), []).append(node)
             G.nodes_to_communities[node] = comm
-            if comm not in G.communities_to_groups:
-                G.communities_to_groups[comm] = []
-            G.communities_to_groups[comm].append(group)
+            G.communities_to_groups.setdefault(comm, []).append(group)
 
-        G.number_of_communities = int(assignments.max()) + 1 if len(assignments) > 0 else 0
+        all_assigned_comms = list(assignments) + list(range(len(seeds)))
+        G.number_of_communities = max(all_assigned_comms) + 1 if all_assigned_comms else 0
     except ImportError:
         print("Using Python fallback for capacity-based node processing...")
-
         _process_nodes_capacity_python(
-            G, all_nodes, node_groups, num_communities,
-            target, total_nodes, target_counts, new_comm_penalty,
+            G, sa_nodes, sa_groups, num_communities,
+            target, sa_total_nodes, target_counts, new_comm_penalty,
+            initial_comp=initial_comp if initial_comp else None,
         )
 
     print(f"\nCapacity-based community assignment complete: "
-          f"{total_nodes} nodes → {G.number_of_communities} communities")
+          f"{total_nodes} nodes -> {G.number_of_communities} communities")
 
 
 def connect_all_within_communities(G, verbose=True):
@@ -549,7 +680,7 @@ def fill_unfulfilled_group_pairs(G, reciprocity_p, verbose=True):
                 stats['edges_added'] += 1
                 added_this_round += 1
                 if reciprocity_p > 0 and random.random() < reciprocity_p:
-                    if (G.existing_num_links[(dst_id, src_id)] < G.maximum_num_links[(dst_id, src_id)]
+                    if (G.existing_num_links.get((dst_id, src_id), 0) < G.maximum_num_links.get((dst_id, src_id), 0)
                             and not G.graph.has_edge(d, s)):
                         G.graph.add_edge(d, s)
                         G.existing_num_links[(dst_id, src_id)] += 1
@@ -618,7 +749,7 @@ def fill_unfulfilled_group_pairs(G, reciprocity_p, verbose=True):
                         stats['edges_added'] += 1
                         added_this_round += 1
                         if reciprocity_p > 0 and random.random() < reciprocity_p:
-                            if (G.existing_num_links[(dst_id, src_id)] < G.maximum_num_links[(dst_id, src_id)]
+                            if (G.existing_num_links.get((dst_id, src_id), 0) < G.maximum_num_links.get((dst_id, src_id), 0)
                                     and not G.graph.has_edge(d, s)):
                                 G.graph.add_edge(d, s)
                                 G.existing_num_links[(dst_id, src_id)] += 1
@@ -721,9 +852,40 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
                                   new_comm_penalty=new_comm_penalty)
 
     # Serialize to JSON (convert numpy types to native Python types)
+    # For large graphs store probability matrix sparsely to avoid huge JSON files
+    _pm = G.probability_matrix
+    _n = _pm.shape[0] if hasattr(_pm, 'shape') else len(_pm)
+    if _n == 0:
+        # Empty placeholder (e.g. 1-community fast path) — store as empty sparse
+        _pm_serial = {'sparse': True, 'shape': [0, 0], 'rows': [], 'cols': [], 'vals': []}
+    elif _n > 500:
+        # Store as sparse COO without densifying
+        import scipy.sparse as _sp
+        if _sp.issparse(_pm):
+            _coo = _pm.tocoo()
+            _pm_serial = {
+                'sparse': True,
+                'shape': [int(_n), int(_n)],
+                'rows': _coo.row.tolist(),
+                'cols': _coo.col.tolist(),
+                'vals': _coo.data.tolist(),
+            }
+        else:
+            # Dense numpy array — use argwhere (only reaches here for small-to-medium n)
+            _nz = np.argwhere(_pm > 0)
+            _pm_serial = {
+                'sparse': True,
+                'shape': [int(_n), int(_n)],
+                'rows': _nz[:, 0].tolist(),
+                'cols': _nz[:, 1].tolist(),
+                'vals': _pm[_nz[:, 0], _nz[:, 1]].tolist(),
+            }
+    else:
+        _pm_serial = G.probability_matrix.tolist()
+
     data = {
         'number_of_communities': int(G.number_of_communities),
-        'probability_matrix': G.probability_matrix.tolist(),
+        'probability_matrix': _pm_serial,
         'nodes_to_communities': {
             str(k): int(v) for k, v in G.nodes_to_communities.items()
         },
@@ -833,7 +995,7 @@ def create_hierarchical_community_file(
         json.dump(data, f)
 
     if verbose:
-        print(f"  Hierarchical communities: {hh_num_communities} household → "
+        print(f"  Hierarchical communities: {hh_num_communities} household -> "
               f"{target_num_communities} super-communities (block_size={block_size})")
         print(f"  Saved to {output_path}")
 
@@ -862,7 +1024,27 @@ def load_communities(G, community_file_path):
         data = json.load(f)
 
     G.number_of_communities = data['number_of_communities']
-    G.probability_matrix = np.array(data['probability_matrix'])
+    _pm_data = data['probability_matrix']
+    if isinstance(_pm_data, dict) and _pm_data.get('sparse'):
+        _n = _pm_data['shape'][0]
+        if _n == 0:
+            G.probability_matrix = np.zeros((0, 0), dtype=np.float64)
+        elif _n > 5000:
+            # Too large to densify — reconstruct as scipy sparse matrix
+            from scipy.sparse import csr_matrix as _csr
+            _rows = _pm_data['rows']
+            _cols = _pm_data['cols']
+            _vals = _pm_data['vals']
+            G.probability_matrix = _csr(
+                (_vals, (_rows, _cols)), shape=(_n, _n), dtype=np.float64
+            )
+        else:
+            _pm_arr = np.zeros((_n, _n), dtype=np.float64)
+            for r, c, v in zip(_pm_data['rows'], _pm_data['cols'], _pm_data['vals']):
+                _pm_arr[r, c] = v
+            G.probability_matrix = _pm_arr
+    else:
+        G.probability_matrix = np.array(_pm_data)
 
     # Load node-to-community assignments, keeping only nodes present in graph
     graph_nodes = set(G.graph.nodes)
