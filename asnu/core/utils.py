@@ -271,7 +271,7 @@ def desc_groups(pops_path, pop_column = 'n'):
         The list contains the names of the group characteristic collumns.
     """
     df_group_pops = read_file(pops_path)
-
+    df_group_pops = df_group_pops.sort_values("n", ascending = False)
     # Identify characteristic columns (all except pop_column)
     characteristic_cols = [col for col in sorted(df_group_pops.columns) if col != pop_column]
 
