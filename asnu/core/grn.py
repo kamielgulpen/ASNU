@@ -126,7 +126,7 @@ def establish_links(G, src_id, dst_id,
 
             # Reciprocity
             if random.uniform(0,1) < reciprocity_p:
-                if G.existing_num_links[(dst_id, src_id)] < G.maximum_num_links[(dst_id, src_id)] and not G.graph.has_edge(d_from_db, s):
+                if G.existing_num_links.get((dst_id, src_id), 0) < G.maximum_num_links.get((dst_id, src_id), 0) and not G.graph.has_edge(d_from_db, s):
                     G.graph.add_edge(d_from_db, s)
                     G.existing_num_links[(dst_id, src_id)] += 1
                     if (dst_id == src_id):
