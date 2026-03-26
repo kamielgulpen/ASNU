@@ -8,11 +8,7 @@ import time
 import pickle
 from scipy import stats
 # Generate network
-<<<<<<< HEAD:tests/test.py
-links = 'Data/tab_huishouden.csv'
-=======
 links = 'Data/tab_werkschool.csv'
->>>>>>> dd3cdf706b2b73eb59a5898efde935a5a0c6787c:network_generation_scripts/generate_single_network.py
 # as example we use group interaction data on a work / school layer
 pops = 'Data/tab_n_(with oplniv).csv' 
 
@@ -21,34 +17,23 @@ start = time.perf_counter()
 create_communities(
     pops, 
     links,
-<<<<<<< HEAD:tests/test.py
-    scale=0.01, 
-    number_of_communities=5000,
-    output_path='my_communities.json',
-    mode='probability'
-=======
     scale=0.1, 
-    number_of_communities=2000,
-    output_path='my_communities.json'
->>>>>>> dd3cdf706b2b73eb59a5898efde935a5a0c6787c:network_generation_scripts/generate_single_network.py
+    number_of_communities=3000,
+    output_path='my_communities.json',
+    new_comm_penalty = 1.5
 )
 
 graph = generate(
     pops,                             # The group-level population data
     links,                            # The group-level interaction data
-<<<<<<< HEAD:tests/test.py
-    preferential_attachment=0,     # Preferential attachment strength
-    scale=0.01,                        # Population scaling
-=======
     preferential_attachment=0.0,     # Preferential attachment strength
     scale=0.1,                        # Population scaling
->>>>>>> dd3cdf706b2b73eb59a5898efde935a5a0c6787c:network_generation_scripts/generate_single_network.py
     reciprocity=1,                    # Reciprocal edge probability
     transitivity =1,                  # Friend of a friend is my friend probability
     community_file='my_communities.json',                  
     base_path="my_network",           # Path for the FileBasedGraph's data
     bridge_probability=0,
-    fully_connect_communities = True
+    fully_connect_communities = False
 )
 
 end = time.perf_counter()

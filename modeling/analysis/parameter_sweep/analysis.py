@@ -51,6 +51,7 @@ def calculate_variance_metrics(df, use_order=True):
     """
     print("\nCalculating variance metrics...")
     df["order"] = df["hhi"]
+    # df["order"] = df["effective_n"]
     # Determine which column to use for aggregation level
     if use_order and 'order' in df.columns:
         agg_col = 'order'
@@ -554,7 +555,7 @@ if __name__ == "__main__":
     # Script automatically uses 'order' column if available
     # (low order = fine/granular, high order = coarse/aggregated)
     
-    df, variance_df, results = main('modeling/analysis/parameter_sweep/checkpoint_sweep_0.01_he.csv')
+    df, variance_df, results = main('modeling/analysis/parameter_sweep/checkpoint_sweep_0.1_4.csv')
 
     
     # Optional: Show breakdown by network structure

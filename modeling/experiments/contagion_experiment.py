@@ -79,6 +79,7 @@ def _complex_contagion_kernel(data, indices, indptr, degree, state, threshold, i
 
         # Record totals and check early stopping
         all_done = True
+        converged = 0
         for s in range(n_sims):
             t = np.int64(0)
             for i in range(n):
@@ -86,11 +87,13 @@ def _complex_contagion_kernel(data, indices, indptr, degree, state, threshold, i
             time_series[step + 1, s] = t
             if t != np.int64(n) and t != time_series[step, s]:
                 all_done = False
-
+            if t == time_series[step, s] or t == np.int64(n):
+                converged += 1
         actual_steps += 1
         if all_done:
             break
-
+    
+    print(f"converged = {converged}, out of{n_sims}, {actual_steps}")
     return time_series[:actual_steps + 1]
 
 
@@ -251,8 +254,6 @@ class ContagionSimulator:
             totals = np.sum(state, axis=0)
             time_series.append(totals.copy())
             
-            if np.all(totals < self.n * 0.01):
-                print(totals)
             # Stop if converged
             if np.all(totals == self.n) or np.all(totals == prev_totals):
                 break
@@ -351,7 +352,7 @@ def get_avg_shortest_path(G):
         return nx.average_shortest_path_length(G.subgraph(largest_cc))
 
 
-def load_networks(folder, add_random=True, multiplex = False):
+def load_networks(folder, files = None, add_random=True, multiplex = False):
     """
     Load all .pkl networks from a folder and optionally add a Random baseline.
 
@@ -371,6 +372,8 @@ def load_networks(folder, add_random=True, multiplex = False):
     networks = {}
     for pkl_file in sorted(folder.glob('*.pkl')):
         name = pkl_file.stem  # filename without extension
+        if files and name not in files:
+            continue
         if multiplex and name != "multiplex": continue
         with open(pkl_file, 'rb') as f:
             obj = pickle.load(f)
