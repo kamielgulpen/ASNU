@@ -23,6 +23,7 @@ from collections import Counter
 from itertools import product
 from tqdm import tqdm
 from asnu_rust import process_nodes_capacity
+from asnu_rust import process_nodes
 
 import numpy as np
 

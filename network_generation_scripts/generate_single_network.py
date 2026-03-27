@@ -8,23 +8,26 @@ from asnu import generate, create_communities, check_group_interactions, plot_gr
 import time
 import pickle
 from scipy import stats
+
 # Generate network
-links = 'data/enriched/aggregated/interactions_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv'
+# links = 'data/enriched/aggregated/interactions_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv'
+links = 'data/tab_buren.csv'
+
 # as example we use group interaction data on a work / school layer
-pops = 'data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv' 
+# pops = 'data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv' 
+pops = 'data/tab_n_(with oplniv).csv'
 
-scale = 1
-
-scale = 1
+scale = 0.1
 start = time.perf_counter()
+
 # # Step 1: Create communities separately
 create_communities(
     pops, 
     links,
     scale=scale, 
-    number_of_communities = 50,
+    number_of_communities = 1000,
     output_path='my_communities.json',
-    new_comm_penalty = 10000,
+    mode= "probability",
 
 )
 
