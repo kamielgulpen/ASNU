@@ -9,6 +9,7 @@ __pycache__/
 # Data
 *.json
 *.csv
+*.pkl
 
 # images
 *.png
