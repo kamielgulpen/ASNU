@@ -41,7 +41,7 @@ ENRICHED_AGG_DIR = Path('Data/enriched/aggregated')
 BASE_LAYERS          = ["werkschool", "huishouden", "familie", "buren"]
 BASE_CHARACTERISTICS = sorted(["geslacht", "lft", "etngrp", "oplniv"])
 
-scale             = 0.1
+scale             = 1
 reciprocity_p     = 1
 transitivity_p    = 0
 bridge_probability = 0.2
@@ -68,15 +68,17 @@ for pop_file in sorted(ENRICHED_AGG_DIR.glob('pop_*.csv')):
     if links_file.exists():
         enriched_pairs.append((f'enriched/{combo_str}', str(pop_file), str(links_file)))
 
-all_pairs = base_pairs + enriched_pairs
+all_pairs = enriched_pairs
 
 print(f"Found {len(base_pairs)} base pair(s) and {len(enriched_pairs)} enriched pair(s)"
       f" — {len(all_pairs)} total.")
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 for preferential_attachment in np.linspace(0, 0.99, 10):
-    for number_of_communities in np.linspace(1, 1000, 10):
+    for number_of_communities in np.linspace(1, 100, 10):
         number_of_communities = int(number_of_communities)
+        if number_of_communities == 1:
+            continue
 
         params = (f"scale={scale}_comms={number_of_communities}"
                   f"_recip={reciprocity_p}_trans={transitivity_p}"
@@ -95,7 +97,7 @@ for preferential_attachment in np.linspace(0, 0.99, 10):
                 number_of_communities=number_of_communities,
                 output_path='my_communities.json',
                 community_size_distribution='natural',
-                new_comm_penalty=100000000000000000000000000000000000,
+                new_comm_penalty=10**100,
             )
 
             graph = generate(

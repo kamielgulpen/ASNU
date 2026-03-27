@@ -9,15 +9,11 @@ import time
 import pickle
 from scipy import stats
 # Generate network
-
-links = 'Data/enriched/enriched_interactions.csv'
-# links = 'Data/tab_buren.csv'
-
+links = 'data/enriched/aggregated/interactions_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv'
 # as example we use group interaction data on a work / school layer
+pops = 'data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv' 
 
-pops = 'Data/enriched/enriched_pop.csv' 
-# pops = 'Data/tab_n_(with oplniv).csv'
-
+scale = 1
 
 scale = 1
 start = time.perf_counter()
@@ -26,10 +22,10 @@ create_communities(
     pops, 
     links,
     scale=scale, 
-    number_of_communities=12,
+    number_of_communities = 50,
     output_path='my_communities.json',
-    community_size_distribution = 'natural',
-    allow_new_communities=False
+    new_comm_penalty = 10000,
+
 )
 
 graph = generate(
@@ -42,8 +38,7 @@ graph = generate(
     community_file='my_communities.json',                  
     base_path="my_network",           # Path for the FileBasedGraph's data
     bridge_probability=0,
-    fully_connect_communities = False,
-    fill_unfulfilled=True
+    fully_connect_communities = False
 )
 
 end = time.perf_counter()
@@ -94,8 +89,8 @@ plt.show()
 filename = f'a.pkl'
 # Result: 'model_lr=0.001_batch_size=32_epochs=100.pkl'
 
-# Save
-with open(filename, 'wb') as f:
-    pickle.dump(G_nx, f)
+# # Save
+# with open(filename, 'wb') as f:
+#     pickle.dump(G_nx, f)
 
 

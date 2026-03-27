@@ -22,6 +22,7 @@ import random
 from collections import Counter
 from itertools import product
 from tqdm import tqdm
+from asnu_rust import process_nodes_capacity
 
 import numpy as np
 
