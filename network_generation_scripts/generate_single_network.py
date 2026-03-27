@@ -8,26 +8,29 @@ import time
 import pickle
 from scipy import stats
 # Generate network
-links = 'Data/tab_werkschool.csv'
+links = 'data/enriched/aggregated/interactions_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv'
 # as example we use group interaction data on a work / school layer
-pops = 'Data/tab_n_(with oplniv).csv' 
+pops = 'data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv' 
+
+scale = 1
 
 start = time.perf_counter()
 # # Step 1: Create communities separately
 create_communities(
     pops, 
     links,
-    scale=0.1, 
-    number_of_communities=3000,
+    scale=scale, 
+    number_of_communities = 50,
     output_path='my_communities.json',
-    new_comm_penalty = 1.5
+    new_comm_penalty = 10000,
+
 )
 
 graph = generate(
     pops,                             # The group-level population data
     links,                            # The group-level interaction data
     preferential_attachment=0.0,     # Preferential attachment strength
-    scale=0.1,                        # Population scaling
+    scale=scale,                        # Population scaling
     reciprocity=1,                    # Reciprocal edge probability
     transitivity =1,                  # Friend of a friend is my friend probability
     community_file='my_communities.json',                  
@@ -74,12 +77,12 @@ plt.hist(degrees, bins = 50)
 plt.show()
 
 # Create filename from params
-param_str = '_'.join(f'{k}={v}' for k, v in params.items())
+# param_str = '_'.join(f'{k}={v}' for k, v in params.items())
 filename = f'a.pkl'
 # Result: 'model_lr=0.001_batch_size=32_epochs=100.pkl'
 
-# Save
-with open(filename, 'wb') as f:
-    pickle.dump(G_nx, f)
+# # Save
+# with open(filename, 'wb') as f:
+#     pickle.dump(G_nx, f)
 
 
