@@ -542,8 +542,8 @@ def main():
     )
     parser.add_argument("--input",   default="original.pkl",          help="Input .pkl path")
     parser.add_argument("--output",  default="a_enriched.pkl", help="Output .pkl path")
-    parser.add_argument("--csv",     default="Data/outputs/enriched_interactions.csv")
-    parser.add_argument("--pop-csv", default="Data/outputs/enriched_pop.csv")
+    parser.add_argument("--csv",     default="Data/enriched/enriched_interactions.csv")
+    parser.add_argument("--pop-csv", default="Data/enriched/enriched_pop.csv")
     args = parser.parse_args()
 
     input_path   = Path(args.input)
