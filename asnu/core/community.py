@@ -95,17 +95,18 @@ def build_group_pair_to_communities_lookup(G, verbose=False):
     return group_pair_to_communities
 
 
-def populate_communities(G, num_communities, community_size_distribution='natural', new_comm_penalty=100.0):
+def populate_communities(G, num_communities, community_size_distribution='natural', new_comm_penalty=100.0, allow_new_communities=True):
     """Thin wrapper around populate_communities_capacity with a high new_comm_penalty."""
     populate_communities_capacity(
         G, num_communities,
         community_size_distribution=community_size_distribution,
         new_comm_penalty=new_comm_penalty,
+        allow_new_communities=allow_new_communities,
     )
 
 def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
                                    target, total_nodes, target_counts, new_comm_penalty,
-                                   initial_comp=None):
+                                   initial_comp=None, allow_new_communities=True):
     """Pure-Python fallback for capacity-based node assignment using matrix ops.
 
     Optimized: only evaluates non-empty communities, avoids matrix copies,
@@ -192,7 +193,11 @@ def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
 
         # New empty community has zero composition → distance is exactly sqrt(base),
         # penalized to discourage creating new communities and encourage larger ones.
-        new_comm_dist = new_comm_penalty * (base ** 0.5)
+        # When allow_new_communities is False, make it impossible to pick a new community.
+        if allow_new_communities:
+            new_comm_dist = new_comm_penalty * (base ** 0.5)
+        else:
+            new_comm_dist = np.inf
 
         eval_count = num_active  # index of the "new community" candidate
 
@@ -247,13 +252,22 @@ def _process_nodes_capacity_python(G, all_nodes, node_groups, num_communities,
             elif n_valid == 1:
                 choice = int(np.where(valid_mask)[0][0])
             else:
-                choice = eval_count  # fallback: new community (matches Rust unwrap_or)
+                # All distances are inf: if new communities are allowed, open one;
+                # otherwise fall back to the least-bad existing community.
+                if allow_new_communities:
+                    choice = eval_count
+                else:
+                    choice = int(np.argmin(distances)) if num_active > 0 else eval_count
         else:
             finite_mask = np.isfinite(all_distances)
             if finite_mask.any():
                 choice = int(np.argmin(np.where(finite_mask, all_distances, np.inf)))
             else:
-                choice = eval_count  # fallback: new community
+                # All distances are inf: same logic as above.
+                if allow_new_communities:
+                    choice = eval_count
+                else:
+                    choice = int(np.argmin(distances)) if num_active > 0 else eval_count
 
         # If the chosen index is beyond current active communities, create a new one
         if choice >= num_active:
@@ -387,7 +401,7 @@ def find_separated_groups(G, num_communities):
     return selected
 
 
-def populate_communities_capacity(G, num_communities, community_size_distribution='natural', new_comm_penalty=3.0):
+def populate_communities_capacity(G, num_communities, community_size_distribution='natural', new_comm_penalty=3.0, allow_new_communities=True):
     """
     Assign nodes to communities by matching absolute edge counts against
     maximum_num_links budget, with feasibility constraints ensuring
@@ -503,6 +517,7 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
         rust_initial_comp = {comm_id: {int(g): int(c) for g, c in d.items()}
                              for comm_id, d in enumerate(initial_comp)}
 
+        effective_penalty = float('inf') if not allow_new_communities else new_comm_penalty
         assignments = process_nodes_capacity(
             sa_nodes.astype(np.int64),
             sa_groups.astype(np.int64),
@@ -511,7 +526,7 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
             num_communities,
             target_counts if target_counts is not None else None,
             sa_total_nodes,
-            new_comm_penalty,
+            effective_penalty,
             rust_initial_comp if initial_comp else None,
         )
 
@@ -532,6 +547,7 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
             G, sa_nodes, sa_groups, num_communities,
             target, sa_total_nodes, target_counts, new_comm_penalty,
             initial_comp=initial_comp if initial_comp else None,
+            allow_new_communities=allow_new_communities,
         )
 
     print(f"\nCapacity-based community assignment complete: "
@@ -780,7 +796,7 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
                        output_path='communities.json', community_size_distribution='natural',
                        pop_column='n', src_suffix='_src', dst_suffix='_dst',
                        link_column='n', min_group_size=0, verbose=True,
-                       new_comm_penalty=3.0):
+                       new_comm_penalty=3.0, allow_new_communities=True):
     """
     Create community assignments and save them to a JSON file.
 
@@ -849,7 +865,23 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
         print(f"\nAssigning nodes (penalty={new_comm_penalty}, initial communities={number_of_communities})...")
     populate_communities_capacity(G, number_of_communities,
                                   community_size_distribution=community_size_distribution,
-                                  new_comm_penalty=new_comm_penalty)
+                                  new_comm_penalty=new_comm_penalty,
+                                  allow_new_communities=allow_new_communities)
+
+    if verbose:
+        # Compute per-community total sizes
+        comm_sizes = {}
+        for (comm_id, _group_id), nodes in G.communities_to_nodes.items():
+            comm_sizes[comm_id] = comm_sizes.get(comm_id, 0) + len(nodes)
+        sizes = list(comm_sizes.values())
+        if sizes:
+            print(f"\nCommunity size statistics ({len(sizes)} communities):")
+            print(f"  Largest:  {max(sizes)}")
+            print(f"  Smallest: {min(sizes)}")
+            print(f"  Mean:     {np.mean(sizes):.1f}")
+            print(f"  Median:   {np.median(sizes):.1f}")
+            print(f"  Std:      {np.std(sizes):.1f}")
+            print(f"  Q1/Q3:    {np.quantile(sizes, 0.25):.1f} / {np.quantile(sizes, 0.75):.1f}")
 
     # Serialize to JSON (convert numpy types to native Python types)
     # For large graphs store probability matrix sparsely to avoid huge JSON files
