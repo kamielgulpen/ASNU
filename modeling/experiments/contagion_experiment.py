@@ -261,7 +261,7 @@ class ContagionSimulator:
                     for sim in range(n_simulations)]
     
     def complex_contagion(self, threshold=2, threshold_type='absolute',
-                         initial_infected=1, max_steps=30, n_simulations=1,
+                         initial_infected=1, max_steps=1000, n_simulations=1,
                          seeding='random'):
         """
         Deterministic threshold model.
@@ -283,7 +283,7 @@ class ContagionSimulator:
             self.adj.data, self.adj.indices, self.adj.indptr,
             self.degree, state, float(threshold), is_fractional, max_steps
         )
-
+     
         # ts shape: (actual_steps+1, n_sims) — convert to list-of-lists per sim
         return [[int(ts[t, sim]) for t in range(ts.shape[0])]
                 for sim in range(n_simulations)]
@@ -461,14 +461,14 @@ def run_experiment(networks, n_simulations=50):
         print(f"  Processing {name} network...")
         sim = ContagionSimulator(G, name)
 
-        # Simple contagion — all simulations in one batched call
-        results['simple'][name] = sim.simple_contagion(
-            p_transmit=0.01, initial_infected=800, n_simulations=n_simulations)
+        # # Simple contagion — all simulations in one batched call
+        # results['simple'][name] = sim.simple_contagion(
+        #     p_transmit=0.01, initial_infected=800, n_simulations=n_simulations)
 
         # Complex contagion — all simulations in one batched call
         results['complex'][name] = sim.complex_contagion(
             threshold=0.25, threshold_type='fraction', initial_infected=800,
-            n_simulations=n_simulations, seeding = "random")
+            n_simulations=n_simulations, seeding = "random", max_steps=1000000)
 
     print("Simulations complete!\n")
     return results
@@ -750,7 +750,7 @@ def _run_experiment_on_folder(network_folder, multiplex=False):
     # plot_degree_distributions(networks, node_dist_dir)
 
     # Run simulations
-    results = run_experiment(networks, n_simulations=50)
+    results = run_experiment(networks, n_simulations=250)
 
     # Analyze results
     print("="*70)
@@ -791,7 +791,14 @@ def main(network_folder='Data/networks/werkschool/scale=0.01_comms=1.0_recip=1_t
     print("\n" + "="*70)
     print("CONTAGION EXPERIMENT: SIMPLE vs COMPLEX")
     print("="*70)
+    with open('Data/networks/geslacht_lft_oplniv.pkl', 'r') as f:
+        G = pickle.load(f)
+    network_graphs = {'a': G}
+    print(G.graph)
 
+    networks = {key: network_graphs[key].graph for key in network_graphs}
+    print(networks['a'])
+    results = run_experiment(networks, n_simulations=50)
     folder = Path(network_folder)
     print(folder)
     # Check if this folder has .pkl files directly or subfolders

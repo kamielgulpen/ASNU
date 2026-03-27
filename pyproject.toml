@@ -38,6 +38,7 @@ dependencies = [
     "tqdm>=4.67.3",
     "nbconvert>=7.16.6",
     "filelock>=3.16.1",
+    "numba>=0.58.1",
 ]
 
 [project.optional-dependencies]

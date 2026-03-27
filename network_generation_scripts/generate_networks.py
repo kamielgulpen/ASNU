@@ -47,7 +47,7 @@ bridge_probability = 0.2
 
 for preferential_attachment in np.linspace(0,0.99,10):
     print(preferential_attachment/1)
-    for number_of_communities in np.linspace(1,1000,10):
+    for number_of_communities in np.linspace(1,100,10):
         params = (f"scale={scale}_comms={number_of_communities}"
                 f"_recip={reciprocity_p}_trans={transitivity_p}"
                 f"_pa={preferential_attachment}_bridge={bridge_probability}")
