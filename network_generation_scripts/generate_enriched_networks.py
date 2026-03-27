@@ -97,7 +97,8 @@ for preferential_attachment in np.linspace(0, 0.99, 10):
                 number_of_communities=number_of_communities,
                 output_path='my_communities.json',
                 community_size_distribution='natural',
-                new_comm_penalty=10**100,
+                allow_new_communities = False
+
             )
 
             graph = generate(
