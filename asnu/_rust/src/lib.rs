@@ -1,11 +1,153 @@
 use std::collections::{HashMap, HashSet};
 
 use numpy::ndarray::Array1;
-use numpy::{PyArray1, PyReadonlyArray1};
+use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray1, PyReadwriteArray2};
 use pyo3::prelude::*;
 use rand::distributions::WeightedIndex;
 use rand::prelude::*;
 use rand::seq::SliceRandom;
+
+/// Port of the "process nodes" loop from populate_communities() (probability mode).
+#[pyfunction]
+#[pyo3(signature = (all_nodes, node_groups, community_composition, community_sizes, group_exposure, ideal, target_counts=None, total_nodes=0))]
+fn process_nodes<'py>(
+    py: Python<'py>,
+    all_nodes: PyReadonlyArray1<'py, i64>,
+    node_groups: PyReadonlyArray1<'py, i64>,
+    mut community_composition: PyReadwriteArray2<'py, f64>,
+    mut community_sizes: PyReadwriteArray1<'py, i32>,
+    mut group_exposure: PyReadwriteArray2<'py, f64>,
+    ideal: PyReadonlyArray2<'py, f64>,
+    target_counts: Option<PyReadonlyArray1<'py, i32>>,
+    total_nodes: usize,
+) -> PyResult<Bound<'py, PyArray1<i64>>> {
+    let all_nodes = all_nodes.as_array();
+    let node_groups = node_groups.as_array();
+    let ideal = ideal.as_array();
+
+    let num_communities = community_composition.as_array().shape()[0];
+    let n_groups = community_composition.as_array().shape()[1];
+
+    let tc: Option<Array1<i32>> = target_counts.map(|t| t.as_array().to_owned());
+
+    let mut rng = thread_rng();
+    let mut assignments: Vec<i64> = Vec::with_capacity(total_nodes);
+
+    let mut distances = vec![0.0f64; num_communities];
+    let mut hyp_row = vec![0.0f64; n_groups];
+
+    for node_idx in 0..total_nodes {
+        let group = node_groups[node_idx] as usize;
+
+        let comp = community_composition.as_array();
+        let ge = group_exposure.as_array();
+
+        for c in 0..num_communities {
+            let mut hyp_total: f64 = 0.0;
+            for g in 0..n_groups {
+                let val = ge[[group, g]] + comp[[c, g]];
+                hyp_row[g] = val;
+                hyp_total += val;
+            }
+            if hyp_total < 1e-10 {
+                hyp_total = 1e-10;
+            }
+            let mut dist_sq: f64 = 0.0;
+            for g in 0..n_groups {
+                let diff = (hyp_row[g] / hyp_total) - ideal[[group, g]];
+                dist_sq += diff * diff;
+            }
+            distances[c] = dist_sq.sqrt();
+        }
+
+        if let Some(ref tc) = tc {
+            let sizes = community_sizes.as_array();
+            for c in 0..num_communities {
+                if sizes[c] >= tc[c] {
+                    distances[c] = f64::INFINITY;
+                }
+            }
+        }
+
+        let temperature: f64 = 1.0 - (node_idx as f64 / total_nodes as f64);
+        let best_community: usize;
+
+        if temperature > 0.05 {
+            let valid: Vec<usize> = (0..num_communities)
+                .filter(|&c| distances[c].is_finite())
+                .collect();
+
+            if valid.len() > 1 {
+                let max_neg_d = valid
+                    .iter()
+                    .map(|&c| -distances[c] / (temperature + 1e-10))
+                    .fold(f64::NEG_INFINITY, f64::max);
+
+                let weights: Vec<f64> = valid
+                    .iter()
+                    .map(|&c| ((-distances[c] / (temperature + 1e-10)) - max_neg_d).exp())
+                    .collect();
+
+                let dist = WeightedIndex::new(&weights).unwrap();
+                best_community = valid[dist.sample(&mut rng)];
+            } else if valid.len() == 1 {
+                best_community = valid[0];
+            } else {
+                best_community = distances
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .unwrap()
+                    .0;
+            }
+        } else {
+            best_community = distances
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0;
+        }
+
+        assignments.push(best_community as i64);
+
+        {
+            let comp = community_composition.as_array();
+            let mut ge = group_exposure.as_array_mut();
+            for g in 0..n_groups {
+                ge[[group, g]] += comp[[best_community, g]];
+            }
+            for g in 0..n_groups {
+                if comp[[best_community, g]] > 0.0 {
+                    ge[[g, group]] += 1.0;
+                }
+            }
+        }
+
+        {
+            let mut comp = community_composition.as_array_mut();
+            comp[[best_community, group]] += 1.0;
+        }
+        {
+            let mut sizes = community_sizes.as_array_mut();
+            sizes[best_community] += 1;
+        }
+
+        if (node_idx + 1) % 5000 == 0 {
+            let pct = 100.0 * (node_idx + 1) as f64 / total_nodes as f64;
+            println!(
+                "Assigned {}/{} nodes ({:.1}%)",
+                node_idx + 1,
+                total_nodes,
+                pct
+            );
+        }
+    }
+
+    let result = Array1::from(assignments);
+    Ok(PyArray1::from_owned_array_bound(py, result))
+}
+
 
 /// Port of _run_edge_creation + establish_links while loop.
 ///
@@ -791,6 +933,7 @@ fn process_nodes_capacity_sparse<'py>(
 /// Python module
 #[pymodule]
 fn asnu_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(process_nodes, m)?)?;
     m.add_function(wrap_pyfunction!(run_edge_creation, m)?)?;
     m.add_function(wrap_pyfunction!(process_nodes_capacity, m)?)?;
     m.add_function(wrap_pyfunction!(process_nodes_capacity_sparse, m)?)?;
