@@ -506,7 +506,7 @@ fn process_nodes_capacity<'py>(
     let mut distances: Vec<f64> = vec![0.0; max_communities + 1];
 
     // Soft penalty weight for exceeding the edge budget
-    const OVERSHOOT_PENALTY: f64 = 10.0;
+    const OVERSHOOT_PENALTY: f64 = 1.0;
 
     for node_idx in 0..total_nodes {
         let g = node_groups[node_idx] as usize;

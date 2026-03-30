@@ -231,7 +231,7 @@ def _run_edge_creation_python(G, links_path, fraction, reciprocity_p, transitivi
         dst_gid_list = _dst_gids.astype(int).tolist()
     else:
         df_n_group_links = read_file(links_path)
-        df_n_group_links = df_n_group_links.sort_values('n', ascending= True)
+        # df_n_group_links = df_n_group_links.sort_values('n', ascending= True)
         src_cols = [c for c in df_n_group_links.columns if c.endswith(src_suffix)]
         dst_cols = [c for c in df_n_group_links.columns if c.endswith(dst_suffix)]
         src_attr_names = [c[:-len(src_suffix)] for c in src_cols]
@@ -323,7 +323,7 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
     else:
         # Fallback: recompute from file using the same merge approach
         df_n_group_links = read_file(links_path)
-        df_n_group_links = df_n_group_links.sort_values("n", ascending=True)
+        # df_n_group_links = df_n_group_links.sort_values("n", ascending=True)
         _src_cols = [c for c in df_n_group_links.columns if c.endswith(src_suffix)]
         _dst_cols = [c for c in df_n_group_links.columns if c.endswith(dst_suffix)]
         _src_attr = [c[:-len(src_suffix)] for c in _src_cols]
