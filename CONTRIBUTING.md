@@ -6,7 +6,7 @@ Thank you for your interest in contributing to ASNU!
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/asnu.git
+git clone https://github.com/kamielgulpen/asnu.git
 cd asnu
 ```
 
