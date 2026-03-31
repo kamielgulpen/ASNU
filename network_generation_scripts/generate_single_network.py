@@ -14,8 +14,8 @@ from scipy import stats
 links = 'Data/tab_buren.csv'
 # as example we use group interaction data on a work / school layer
 # pops = 'data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv' 
-
-scale = 0.1
+pops  = 'Data/tab_n_(with oplniv).csv'
+scale = 1
 start = time.perf_counter()
 
 # # Step 1: Create communities separately
