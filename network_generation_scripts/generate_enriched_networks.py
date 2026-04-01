@@ -35,7 +35,6 @@ def nx_to_igraph(nx_graph):
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-BASE_AGG_DIR     = Path('Data/aggregated')
 ENRICHED_AGG_DIR = Path('Data/enriched/aggregated')
 
 BASE_LAYERS          = ["werkschool", "huishouden", "familie", "buren"]
@@ -49,17 +48,6 @@ bridge_probability = 0.2
 
 # ── Discover all (source_label, pops_path, links_path) pairs ─────────────────
 
-# 1. Base aggregated: one entry per layer × characteristic combo
-base_pairs = []
-for layer in BASE_LAYERS:
-    for r in range(1, len(BASE_CHARACTERISTICS) + 1):
-        for combo in combinations(BASE_CHARACTERISTICS, r):
-            combo_str = '_'.join(combo)
-            pops  = BASE_AGG_DIR / f'tab_n_{combo_str}.csv'
-            links = BASE_AGG_DIR / f'tab_{layer}_{combo_str}.csv'
-            if pops.exists() and links.exists():
-                base_pairs.append((f'{layer}/{combo_str}', str(pops), str(links)))
-
 # 2. Enriched aggregated: discovered from pop_*.csv files
 enriched_pairs = []
 for pop_file in sorted(ENRICHED_AGG_DIR.glob('pop_*.csv')):
@@ -70,21 +58,17 @@ for pop_file in sorted(ENRICHED_AGG_DIR.glob('pop_*.csv')):
 
 all_pairs = enriched_pairs
 
-print(f"Found {len(base_pairs)} base pair(s) and {len(enriched_pairs)} enriched pair(s)"
-      f" — {len(all_pairs)} total.")
-
 # ── Main loop ─────────────────────────────────────────────────────────────────
 for preferential_attachment in np.linspace(0, 0.99, 10):
     for number_of_communities in np.linspace(1, 100, 10):
         number_of_communities = int(number_of_communities)
-        if number_of_communities == 1:
-            continue
 
         params = (f"scale={scale}_comms={number_of_communities}"
                   f"_recip={reciprocity_p}_trans={transitivity_p}"
                   f"_pa={preferential_attachment:.2f}_bridge={bridge_probability}")
-
+        count = 0
         for label, pops, links in all_pairs:
+            count += 1
             print(f"\n{'='*60}")
             print(f"PA={preferential_attachment:.2f}  comms={number_of_communities}  [{label}]")
             print(f"{'='*60}")
@@ -92,12 +76,12 @@ for preferential_attachment in np.linspace(0, 0.99, 10):
             start = time.perf_counter()
 
             create_communities(
-                pops, links,
-                scale=scale,
-                number_of_communities=number_of_communities,
+                pops, 
+                links,
+                scale=scale, 
+                number_of_communities = number_of_communities,
                 output_path='my_communities.json',
-                community_size_distribution='natural',
-                allow_new_communities = False
+                mode= "capacity",
 
             )
 
@@ -109,7 +93,7 @@ for preferential_attachment in np.linspace(0, 0.99, 10):
                 reciprocity=reciprocity_p,
                 transitivity=transitivity_p,
                 community_file='my_communities.json',
-                base_path='my_network',
+                base_path=f'my_networks/{params}/{label}',
                 bridge_probability=bridge_probability,
                 fully_connect_communities=False,
                 fill_unfulfilled=True,
@@ -145,7 +129,3 @@ for preferential_attachment in np.linspace(0, 0.99, 10):
             plt.savefig(output_dir / 'node_distribution' / f'{combo_name}.png',
                         dpi=300, bbox_inches='tight')
             plt.close()
-
-            with open(output_dir / f'{combo_name}.pkl', 'wb') as f:
-                pickle.dump(graph, f)
-            print(f"Saved -> {output_dir / f'{combo_name}.pkl'}")

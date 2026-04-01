@@ -10,7 +10,8 @@ __pycache__/
 *.json
 *.csv
 *.pkl
-
+my_networks
+*.gpickle
 # images
 *.png
 
@@ -33,6 +34,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

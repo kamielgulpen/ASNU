@@ -21,6 +21,70 @@ import sys
 import numpy as np
 import networkx as nx
 
+
+import argparse
+import pickle
+from collections import Counter, defaultdict
+from pathlib import Path
+import sys
+
+import numpy as np
+import networkx as nx
+
+
+import argparse
+import pickle
+import json
+from collections import Counter, defaultdict
+from pathlib import Path
+import sys
+
+import numpy as np
+import networkx as nx
+
+def load_network(file_path):
+    """Load network from compressed .npz file"""
+    file_path = Path(file_path)
+    
+    if not str(file_path).endswith('.npz'):
+        file_path = Path(f'{file_path}.npz')
+    
+    if not file_path.exists():
+        raise FileNotFoundError(f"Network file not found: {file_path}")
+    
+    print(f"  Loading from {file_path}...")
+    
+    # Load compressed archive
+    data = np.load(file_path, allow_pickle=True)
+    
+    # Create graph
+    directed = bool(data['directed'])
+    G = nx.DiGraph() if directed else nx.Graph()
+    
+    # CRITICAL: Add ALL nodes first (including isolates)
+    if 'nodes' in data:
+        G.add_nodes_from(data['nodes'])
+    else:
+        # Fallback for old format: extract nodes from node_attrs
+        node_attrs = data['node_attrs'].item()
+        G.add_nodes_from(node_attrs.keys())
+    
+    # Then add edges
+    edges = data['edges']
+    G.add_edges_from(edges)
+    
+    # Restore node attributes
+    node_attrs = data['node_attrs'].item()
+    nx.set_node_attributes(G, node_attrs)
+    
+    # Verify node count
+    expected = int(data['num_nodes'])
+    actual = G.number_of_nodes()
+    if expected != actual:
+        print(f"  WARNING: Expected {expected} nodes but loaded {actual}!", file=sys.stderr)
+    
+    return G
+
 # ─────────────────────────────────────────────────────────────────
 # CONSTANTS (same as original)
 # ─────────────────────────────────────────────────────────────────
@@ -720,8 +784,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Enrich network (OPTIMIZED for large graphs)"
     )
-    parser.add_argument("--input",   default="my_network")
-    parser.add_argument("--output",  default="my_network_enriched")
+    parser.add_argument("--input",   default="my_network/graph.npz")
+    parser.add_argument("--output",  default="a_enriched.gpickle")
     parser.add_argument("--csv",     default="Data/enriched/enriched_interactions.csv")
     parser.add_argument("--pop-csv", default="Data/enriched/enriched_pop.csv")
     parser.add_argument("--encoding-dir", default="Data/enriched/encodings")
@@ -733,9 +797,19 @@ def main():
     pop_csv_path = Path(args.pop_csv)
     encoding_dir = Path(args.encoding_dir)
 
-    print(f"Loading {input_dir} ...")
-    G = _load_graph_from_dir(input_dir)
-    print(f"  {G.number_of_nodes():,} nodes  |  {G.number_of_edges():,} edges")
+    print(f"Loading {input_path} ...")
+    
+    # TRY NumPy format first, fall back to pickle
+
+    G = load_network(input_path)
+    print(f"  Loaded from NumPy format")
+    # except (FileNotFoundError, KeyError):
+    #     print(f"  NumPy format not found, trying pickle...")
+    #     with open(input_path, "rb") as f:
+    #         G = pickle.load(f)
+    #     print(f"  Loaded from pickle format")
+    
+    # print(f"  {G.number_of_nodes():,} nodes  |  {G.number_of_edges():,} edges")
 
     print("Assigning integer ages ...")
     assign_ages(G)
@@ -774,12 +848,6 @@ def main():
 
     print(f"Exporting edge CSV (with integer encodings) ...")
     export_edge_csv_streaming(G, csv_path)
-
-    print(f"\nSaving enriched network to {output_dir} ...")
-    print(f"  (nodes store integer codes - use encoding CSVs to decode)")
-    _save_enriched_graph(G, output_dir, input_dir)
-    print("Done.")
-
 
 if __name__ == "__main__":
     main()

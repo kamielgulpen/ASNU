@@ -109,6 +109,34 @@ class NetworkXGraph:
         with open(self.metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
 
+<<<<<<< HEAD
+    def _load_graph_npz(self, path=None):
+        """Load graph from compressed .npz file"""
+        if path is None:
+            path = self.graph_file.replace('.gpickle', '.npz')
+        
+        # Load compressed archive
+        data = np.load(path, allow_pickle=True)
+        
+        # Create graph
+        directed = bool(data['directed'])
+        G = nx.DiGraph() if directed else nx.Graph()
+        
+        # Add edges
+        edges = data['edges']
+        G.add_edges_from(edges)
+        
+        # Restore node attributes
+        node_attrs = data['node_attrs'].item()  # .item() unpacks the object array
+        nx.set_node_attributes(G, node_attrs)
+        
+        # Restore metadata if present
+        if 'metadata' in data:
+            metadata = pickle.loads(data['metadata'].tobytes())
+            G.graph.update(metadata)
+        
+        return G
+=======
     def _load_metadata(self):
         """Load generation metadata from JSON."""
         import ast
@@ -143,6 +171,7 @@ class NetworkXGraph:
                 self.graph = nx.read_gpickle(self.graph_file)
             except:
                 pass
+>>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
 
     def to_networkx(self):
         """
@@ -295,6 +324,31 @@ class NetworkXGraph:
         return subgraph
 
     def finalize(self):
+<<<<<<< HEAD
+        """Memory-efficient save for ASNU networks"""
+        base_path = self.graph_file.replace('.gpickle', '')
+        
+        # Edges
+        edges = np.array(self.graph.edges(), dtype=np.uint32)
+        
+        # Node attributes (ALL nodes)
+        node_attrs = {
+            node: data for node, data in self.graph.nodes(data=True)
+        }
+        
+        # CRITICAL: Save list of ALL node IDs explicitly
+        all_nodes = np.array(list(self.graph.nodes()), dtype=np.uint32)
+        
+        # Save compressed
+        np.savez_compressed(
+            f'{base_path}.npz',
+            edges=edges,
+            nodes=all_nodes,  # ADD THIS
+            node_attrs=np.array([node_attrs], dtype=object)[0],
+            num_nodes=self.graph.number_of_nodes(),
+            directed=self.graph.is_directed()
+        )
+=======
         """
         Save metadata and graph to disk.
 
@@ -305,6 +359,9 @@ class NetworkXGraph:
 
         Call this after generation is complete to persist the network.
         """
-        self._save_metadata()
-        edges = np.array(list(self.graph.edges()), dtype=np.int32)
-        np.save(os.path.join(self.base_path, "edges.npy"), edges)
+        # self._save_metadata()
+        try:
+            nx.write_gpickle(self.graph, self.graph_file)
+        except:
+            pass
+>>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
