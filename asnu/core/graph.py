@@ -109,7 +109,6 @@ class NetworkXGraph:
         with open(self.metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
 
-<<<<<<< HEAD
     def _load_graph_npz(self, path=None):
         """Load graph from compressed .npz file"""
         if path is None:
@@ -136,7 +135,6 @@ class NetworkXGraph:
             G.graph.update(metadata)
         
         return G
-=======
     def _load_metadata(self):
         """Load generation metadata from JSON."""
         import ast
@@ -171,7 +169,6 @@ class NetworkXGraph:
                 self.graph = nx.read_gpickle(self.graph_file)
             except:
                 pass
->>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
 
     def to_networkx(self):
         """
@@ -324,7 +321,6 @@ class NetworkXGraph:
         return subgraph
 
     def finalize(self):
-<<<<<<< HEAD
         """Memory-efficient save for ASNU networks"""
         base_path = self.graph_file.replace('.gpickle', '')
         
@@ -348,20 +344,4 @@ class NetworkXGraph:
             num_nodes=self.graph.number_of_nodes(),
             directed=self.graph.is_directed()
         )
-=======
-        """
-        Save metadata and graph to disk.
 
-        Saves metadata (group/node mappings, attributes) to metadata.json and
-        the edge list to edges.npy (compact int32 array). Node attributes are
-        NOT stored per-node in the graph file — they are reconstructed on load
-        from nodes_to_group + group_to_attrs in metadata.json.
-
-        Call this after generation is complete to persist the network.
-        """
-        # self._save_metadata()
-        try:
-            nx.write_gpickle(self.graph, self.graph_file)
-        except:
-            pass
->>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
