@@ -43,7 +43,11 @@ preferential_attachment = 0
 
 reciprocity_p = 1
 transitivity_p = 0
+<<<<<<< HEAD
 bridge_probability = 0.1
+=======
+bridge_probability = 0.2
+>>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
 
 for preferential_attachment in np.linspace(0,0.99,10):
     print(preferential_attachment/1)
@@ -54,15 +58,24 @@ for preferential_attachment in np.linspace(0,0.99,10):
 
         characteristics = sorted(["geslacht", "lft", "etngrp", "oplniv"])
 
+<<<<<<< HEAD
         layer = "buren"
+=======
+        layer = "werkschool"
+>>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
 
         for r in range(1, len(characteristics) + 1):
             for combo in combinations(characteristics, r):
                 group_cols = list(combo)
                 characteristics_string = '_'.join(group_cols)
 
+<<<<<<< HEAD
                 links = f'data/enriched/aggregated/interactions_{characteristics_string}.csv'
                 pops = f'data/enriched/aggregated/pop_{characteristics_string}.csv'
+=======
+                links = f'Data/aggregated/tab_{layer}_{characteristics_string}.csv'
+                pops = f'Data/aggregated/tab_n_{characteristics_string}.csv'
+>>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
 
                 print(f"\n{'='*60}")
                 print(f"Generating: {characteristics_string}")

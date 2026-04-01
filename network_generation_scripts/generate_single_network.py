@@ -23,9 +23,15 @@ create_communities(
     pops, 
     links,
     scale=scale, 
+<<<<<<< HEAD
     number_of_communities = 100,
     output_path='my_communities.json',
     mode= "capacity",
+=======
+    number_of_communities = 1000,
+    output_path='my_communities.json',
+    mode= "probability",
+>>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
 
 )
 
@@ -35,10 +41,17 @@ graph = generate(
     preferential_attachment=0.0,     # Preferential attachment strength
     scale=scale,                        # Population scaling
     reciprocity=1,                    # Reciprocal edge probability
+<<<<<<< HEAD
     transitivity =0,                  # Friend of a friend is my friend probability
     community_file='my_communities.json',                  
     base_path="my_network",           # Path for the FileBasedGraph's data
     bridge_probability=0.1,
+=======
+    transitivity =1,                  # Friend of a friend is my friend probability
+    community_file='my_communities.json',                  
+    base_path="my_network",           # Path for the FileBasedGraph's data
+    bridge_probability=0,
+>>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
     fully_connect_communities = False
 )
 
@@ -87,7 +100,11 @@ plt.show()
 
 # Create filename from params
 # param_str = '_'.join(f'{k}={v}' for k, v in params.items())
+<<<<<<< HEAD
 # filename = f'a.pkl'
+=======
+filename = f'a.pkl'
+>>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
 # Result: 'model_lr=0.001_batch_size=32_epochs=100.pkl'
 
 # # Save
