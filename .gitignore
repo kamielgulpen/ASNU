@@ -10,6 +10,7 @@ __pycache__/
 *.json
 *.csv
 *.pkl
+my_networks
 
 # images
 *.png

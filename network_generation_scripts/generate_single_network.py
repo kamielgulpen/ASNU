@@ -14,8 +14,7 @@ from scipy import stats
 links = 'Data/tab_buren.csv'
 # as example we use group interaction data on a work / school layer
 # pops = 'data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv' 
-pops = 'data/tab_n_(with oplniv).csv'
-
+pops  = 'Data/tab_n_(with oplniv).csv'
 scale = 1
 start = time.perf_counter()
 
@@ -26,12 +25,7 @@ create_communities(
     scale=scale, 
     number_of_communities = 100,
     output_path='my_communities.json',
-    community_size_distribution= 'uniform',
-
-    allow_new_communities=True,
     mode= "capacity",
-    new_comm_penalty = 1.5
-
 
 )
 
@@ -44,7 +38,7 @@ graph = generate(
     transitivity =0,                  # Friend of a friend is my friend probability
     community_file='my_communities.json',                  
     base_path="my_network",           # Path for the FileBasedGraph's data
-    bridge_probability=0.2,
+    bridge_probability=0.1,
     fully_connect_communities = False
 )
 
@@ -69,15 +63,6 @@ for u, v, edge_attrs in G_nx.edges(data=True):
 
 print(f"Graph: {len(G_rx)} nodes, {G_rx.num_edges()} edges")
 print(f"Transitivity:{rx.transitivity(G_rx)}")
-# Get connected components
-components = rx.strongly_connected_components(G_rx)
-# Returns: [{0, 1, 2}, {3, 4}]
-
-# Get cluster sizes
-cluster_sizes = [len(component) for component in components]
-
-print(cluster_sizes, np.mean(cluster_sizes))
-# Returns: [3, 2]
 # print(f"Transitivity (nx):{nx.transitivity(G_nx)}")
 
 # Get degree sequence
@@ -102,11 +87,11 @@ plt.show()
 
 # Create filename from params
 # param_str = '_'.join(f'{k}={v}' for k, v in params.items())
-filename = f'a.pkl'
+# filename = f'a.pkl'
 # Result: 'model_lr=0.001_batch_size=32_epochs=100.pkl'
 
-# Save
-with open(filename, 'wb') as f:
-    pickle.dump(G_nx, f)
+# # Save
+# with open(filename, 'wb') as f:
+#     pickle.dump(G_nx, f)
 
 
