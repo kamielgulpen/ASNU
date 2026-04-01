@@ -6,7 +6,6 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from asnu import generate, create_communities, check_group_interactions, plot_group_interactions
 import time
-import pickle
 from scipy import stats
 
 # Generate network
@@ -23,9 +22,12 @@ create_communities(
     pops, 
     links,
     scale=scale, 
-    number_of_communities = 1000,
+    number_of_communities = 100,
     output_path='my_communities.json',
-    mode= "probability",
+    community_size_distribution = 'uniform',
+    allow_new_communities=True,
+
+    mode= "capacity",
 
 )
 
@@ -85,13 +87,7 @@ print(f"skew: {stats.skew(degrees)}")
 plt.hist(degrees, bins = 50)
 plt.show()
 
-# Create filename from params
-# param_str = '_'.join(f'{k}={v}' for k, v in params.items())
-filename = f'a.pkl'
-# Result: 'model_lr=0.001_batch_size=32_epochs=100.pkl'
-
-# # Save
-# with open(filename, 'wb') as f:
-#     pickle.dump(G_nx, f)
+# Network is saved automatically by generate() to the directory specified by base_path ("my_network/")
+# Files: edges.npy (edge list) + metadata.json (node attributes, group mappings)
 
 

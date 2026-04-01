@@ -113,9 +113,11 @@ class NetworkXGraph:
         """Load generation metadata from JSON."""
         import ast
 
+        num_nodes = 0
         if os.path.exists(self.metadata_file):
             with open(self.metadata_file, 'r') as f:
                 metadata = json.load(f)
+                num_nodes = metadata.get('num_nodes', 0)
                 self.attrs_to_group = {ast.literal_eval(k): v for k, v in metadata.get('attrs_to_group', {}).items()}
                 self.group_to_attrs = metadata.get('group_to_attrs', {})
                 self.group_to_nodes = metadata.get('group_to_nodes', {})
@@ -123,8 +125,20 @@ class NetworkXGraph:
                 self.existing_num_links = {ast.literal_eval(k): v for k, v in metadata.get('existing_num_links', {}).items()}
                 self.maximum_num_links = {ast.literal_eval(k): v for k, v in metadata.get('maximum_num_links', {}).items()}
 
-        # Load pickled graph if available
-        if os.path.exists(self.graph_file):
+        # Prefer compact edges.npy over legacy gpickle
+        edges_file = os.path.join(self.base_path, "edges.npy")
+        if os.path.exists(edges_file):
+            edges = np.load(edges_file)
+            self.graph = nx.DiGraph()
+            # Add all nodes (including isolates) with attributes from metadata
+            for node_id in range(num_nodes):
+                group_id = self.nodes_to_group.get(node_id)
+                attrs = self.group_to_attrs.get(str(group_id), {}) if group_id is not None else {}
+                self.graph.add_node(node_id, **attrs)
+            # Add edges
+            if edges.size > 0:
+                self.graph.add_edges_from(edges.tolist())
+        elif os.path.exists(self.graph_file):
             try:
                 self.graph = nx.read_gpickle(self.graph_file)
             except:
@@ -284,10 +298,13 @@ class NetworkXGraph:
         """
         Save metadata and graph to disk.
 
+        Saves metadata (group/node mappings, attributes) to metadata.json and
+        the edge list to edges.npy (compact int32 array). Node attributes are
+        NOT stored per-node in the graph file — they are reconstructed on load
+        from nodes_to_group + group_to_attrs in metadata.json.
+
         Call this after generation is complete to persist the network.
         """
-        # self._save_metadata()
-        try:
-            nx.write_gpickle(self.graph, self.graph_file)
-        except:
-            pass
+        self._save_metadata()
+        edges = np.array(list(self.graph.edges()), dtype=np.int32)
+        np.save(os.path.join(self.base_path, "edges.npy"), edges)
