@@ -109,7 +109,6 @@ class NetworkXGraph:
         with open(self.metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
 
-<<<<<<< HEAD
     def _load_graph_npz(self, path=None):
         """Load graph from compressed .npz file"""
         if path is None:
@@ -136,28 +135,6 @@ class NetworkXGraph:
             G.graph.update(metadata)
         
         return G
-=======
-    def _load_metadata(self):
-        """Load generation metadata from JSON."""
-        import ast
-
-        if os.path.exists(self.metadata_file):
-            with open(self.metadata_file, 'r') as f:
-                metadata = json.load(f)
-                self.attrs_to_group = {ast.literal_eval(k): v for k, v in metadata.get('attrs_to_group', {}).items()}
-                self.group_to_attrs = metadata.get('group_to_attrs', {})
-                self.group_to_nodes = metadata.get('group_to_nodes', {})
-                self.nodes_to_group = {int(k): v for k, v in metadata.get('nodes_to_group', {}).items()}
-                self.existing_num_links = {ast.literal_eval(k): v for k, v in metadata.get('existing_num_links', {}).items()}
-                self.maximum_num_links = {ast.literal_eval(k): v for k, v in metadata.get('maximum_num_links', {}).items()}
-
-        # Load pickled graph if available
-        if os.path.exists(self.graph_file):
-            try:
-                self.graph = nx.read_gpickle(self.graph_file)
-            except:
-                pass
->>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
 
     def to_networkx(self):
         """
@@ -310,7 +287,6 @@ class NetworkXGraph:
         return subgraph
 
     def finalize(self):
-<<<<<<< HEAD
         """Memory-efficient save for ASNU networks"""
         base_path = self.graph_file.replace('.gpickle', '')
         
@@ -334,15 +310,3 @@ class NetworkXGraph:
             num_nodes=self.graph.number_of_nodes(),
             directed=self.graph.is_directed()
         )
-=======
-        """
-        Save metadata and graph to disk.
-
-        Call this after generation is complete to persist the network.
-        """
-        # self._save_metadata()
-        try:
-            nx.write_gpickle(self.graph, self.graph_file)
-        except:
-            pass
->>>>>>> 8d3d7d458bd0449ae448cd832b03d32a59eb4a97
