@@ -8,7 +8,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
-from itertools import combinations, product
+from itertools import combinations, product, zip_longest
 from typing import Dict, List, Tuple, Optional, Iterator
 from dataclasses import dataclass
 import gc
