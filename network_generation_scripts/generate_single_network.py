@@ -9,11 +9,11 @@ import time
 from scipy import stats
 
 # Generate network
-links = 'Data/enriched/aggregated/interactions_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv'
-# links = 'Data/tab_huishouden.csv'
+# links = 'data/enriched/aggregated/interactions_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv'
+links = 'data/enriched/aggregated/interactions_geslacht.csv'
 # as example we use group interaction data on a work / school layer
-pops = 'Data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv' 
-# pops  = 'Data/tab_n_(with oplniv).csv'
+# pops = 'data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv' 
+pops  = 'data/enriched/aggregated/pop_geslacht.csv'
 scale = 1
 start = time.perf_counter()
 
@@ -22,10 +22,12 @@ create_communities(
     pops, 
     links,
     scale=scale, 
-    number_of_communities = 10000,
+    number_of_communities = 3000,
     output_path='my_communities.json',
     mode= "capacity",
-    allow_new_communities= False
+    allow_new_communities=False,
+    new_comm_penalty=400
+
 
 )
 
@@ -39,7 +41,8 @@ graph = generate(
     community_file='my_communities.json',                  
     base_path="my_network",           # Path for the FileBasedGraph's data
     bridge_probability=0,
-    fully_connect_communities = False
+    fully_connect_communities = False,
+    fill_unfulfilled = False
 )
 
 end = time.perf_counter()
@@ -84,4 +87,14 @@ print(f"skew: {stats.skew(degrees)}")
 
 plt.hist(degrees, bins = 50)
 plt.show()
+
+# Create filename from params
+# param_str = '_'.join(f'{k}={v}' for k, v in params.items())
+# filename = f'a.pkl'
+# Result: 'model_lr=0.001_batch_size=32_epochs=100.pkl'
+
+# # Save
+# with open(filename, 'wb') as f:
+#     pickle.dump(G_nx, f)
+
 
