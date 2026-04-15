@@ -460,84 +460,95 @@ def find_separated_groups(G, num_communities):
     Uses greedy farthest-point selection: starts with the group that has the
     lowest total interaction, then repeatedly picks the group with the least
     accumulated interaction toward already-selected groups.
-
-    Parameters
-    ----------
-    G : NetworkXGraph
-        Graph with group_ids, group_to_nodes, and maximum_num_links populated.
-    num_communities : int
-        Number of (group, node) seed pairs to return.
-
-    Returns
-    -------
-    list of (group_id, node_id)
-        One seed per community, chosen from the most mutually isolated groups.
     """
+    import heapq
+    from collections import defaultdict
+
     # Only consider groups that have at least one node
     groups_with_nodes = [g for g in G.group_ids if G.group_to_nodes.get(g)]
     if not groups_with_nodes:
         return []
+    groups_set = set(groups_with_nodes)
+    group_index = {g: i for i, g in enumerate(groups_with_nodes)}  # stable tiebreak
 
-    # Total interaction per group (sum of all outgoing + incoming links)
-    group_totals = {}
-    for (g, h), count in G.maximum_num_links.items():
-        group_totals[g] = group_totals.get(g, 0) + count
-        group_totals[h] = group_totals.get(h, 0) + count
+    # One pass over edges builds both group_totals AND per-group adjacency.
+    # neighbors[B][g] = amount added to interaction_sum[g] when B is selected
+    #                = maximum_num_links.get((g, B), 0) + maximum_num_links.get((B, g), 0)
+    neighbors = defaultdict(dict)
+    group_totals = defaultdict(int)
+    for (a, b), cnt in G.maximum_num_links.items():
+        a_in = a in groups_set
+        b_in = b in groups_set
+        if a_in:
+            group_totals[a] += cnt
+        if b_in:
+            group_totals[b] += cnt
+        if a_in and b_in:
+            nb = neighbors[a]; nb[b] = nb.get(b, 0) + cnt
+            nb = neighbors[b]; nb[a] = nb.get(a, 0) + cnt
 
-    # interaction_sum[g] = total interaction between g and all already-selected groups
-    interaction_sum = {g: 0 for g in groups_with_nodes}
+    interaction_sum = dict.fromkeys(groups_with_nodes, 0)
     selected_groups = set()
     used_nodes = set()
-    selected = []  # list of (group_id, node_id)
-
+    selected = []
     n_target = min(num_communities, len(groups_with_nodes))
+
+    heap = None  # built lazily after the first seed is placed
 
     for _ in range(n_target):
         if not selected:
-            # First seed: group with the lowest total interaction (most isolated)
+            # First seed: group with lowest overall interaction
             best_group = min(groups_with_nodes, key=lambda g: group_totals.get(g, 0))
         else:
-            best_group = min(
-                (g for g in groups_with_nodes if g not in selected_groups),
-                key=lambda g: interaction_sum[g],
-                default=None,
-            )
-        if best_group is None:
-            break
+            if heap is None:
+                heap = [(interaction_sum[g], group_index[g], g)
+                        for g in groups_with_nodes if g not in selected_groups]
+                heapq.heapify(heap)
+            best_group = None
+            # Lazy deletion: skip stale (value no longer matches) or already-selected entries
+            while heap:
+                val, _, g = heapq.heappop(heap)
+                if g in selected_groups:
+                    continue
+                if val != interaction_sum[g]:
+                    continue
+                best_group = g
+                break
+            if best_group is None:
+                break
 
         # Pick a node from this group not already used as a seed
         candidates = [n for n in G.group_to_nodes[best_group] if n not in used_nodes]
         if not candidates:
-            selected_groups.add(best_group)  # mark exhausted; skip in future iterations
+            selected_groups.add(best_group)  # exhausted; skip in future iterations
             continue
-
         node = random.choice(candidates)
         selected.append((best_group, node))
         selected_groups.add(best_group)
         used_nodes.add(node)
 
-        # Update interaction sums: other groups now accumulate interaction toward best_group
-        for g in groups_with_nodes:
-            if g not in selected_groups:
-                interaction_sum[g] += (
-                    G.maximum_num_links.get((g, best_group), 0) +
-                    G.maximum_num_links.get((best_group, g), 0)
-                )
+        # Only walk the groups that actually share an edge with best_group
+        nb = neighbors.get(best_group)
+        if nb:
+            for g, w in nb.items():
+                if g in selected_groups:
+                    continue
+                interaction_sum[g] += w
+                if heap is not None:
+                    heapq.heappush(heap, (interaction_sum[g], group_index[g], g))
 
-    # If more seeds are needed than unique groups, fill from least-interactive nodes
-    while len(selected) < num_communities:
-        candidates = [
-            (g, n)
-            for g in groups_with_nodes
-            for n in G.group_to_nodes[g]
-            if n not in used_nodes
-        ]
-        if not candidates:
-            break
-        candidates.sort(key=lambda gn: group_totals.get(gn[0], 0))
-        best_group, node = candidates[0]
-        selected.append((best_group, node))
-        used_nodes.add(node)
+    # Fallback: more seeds requested than unique groups — sort once, fill in order
+    if len(selected) < num_communities:
+        sorted_groups = sorted(groups_with_nodes, key=lambda g: group_totals.get(g, 0))
+        for g in sorted_groups:
+            if len(selected) >= num_communities:
+                break
+            for n in G.group_to_nodes[g]:
+                if n not in used_nodes:
+                    selected.append((g, n))
+                    used_nodes.add(n)
+                    if len(selected) >= num_communities:
+                        break
 
     return selected
 

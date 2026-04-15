@@ -20,7 +20,7 @@ def load_data(file_path):
     """Load the CSV file"""
     df = pd.read_csv(file_path)
     print(f"Loaded {len(df)} rows")
-    
+    print(df.columns)
     # Check if order column exists
     if 'order' in df.columns:
         print(f"Order values found: {sorted(df['order'].unique())} (low=fine, high=coarse)")
@@ -29,7 +29,9 @@ def load_data(file_path):
         print(f"Aggregation levels found: {sorted(df['network'].unique())}")
     
     df_mapping = pd.read_csv("group_charcteristic_mapping.csv")
-    print(df.columns)
+
+    df_mapping["hhi"] = df_mapping["hhi"].round(4)
+
     df = df.merge(df_mapping, left_on="network", right_on="aggregation" )
 
     return df
@@ -68,7 +70,8 @@ def calculate_variance_metrics(df, use_order=True):
         
         # Between-network variance: variance across ALL network realizations
         # This includes variance from different n_communities, pref_attachment, etc.
-        outcomes = group['median_final_adoption'].values
+        print(group.columns)
+        outcomes = group['mean_final_adoption'].values
         
         if len(outcomes) > 1:
             between_var = np.var(outcomes, ddof=1)
@@ -78,7 +81,7 @@ def calculate_variance_metrics(df, use_order=True):
             between_sd = 0
         
         # Within-network variance: average of internal variances
-        within_var = group['internal_variance_adoption'].mean()
+        within_var = group['variance_final_adoption'].mean()
         within_sd = np.sqrt(within_var)
         
         # Mean outcome
@@ -281,6 +284,358 @@ def test_h1(variance_df):
     return all_results
 
 
+def analyze_distributions(df, use_order=True):
+    """
+    Basic distribution statistics
+    """
+    print("\n" + "="*60)
+    print("DISTRIBUTION SUMMARY")
+    print("="*60)
+    
+    if use_order and 'order' in df.columns:
+        agg_col = 'order'
+    else:
+        agg_col = 'network'
+    
+    # By threshold
+    print("\nBy Threshold:")
+    threshold_stats = []
+    for threshold in sorted(df['threshold_value'].unique()):
+        data = df[df['threshold_value'] == threshold]['mean_final_adoption']
+        threshold_stats.append({
+            'threshold': threshold,
+            'mean': data.mean(),
+            'std': data.std(),
+            'min': data.min(),
+            'max': data.max(),
+        })
+    
+    threshold_df = pd.DataFrame(threshold_stats)
+    print(threshold_df.to_string(index=False))
+    
+    # By aggregation
+    print("\nBy Aggregation Level:")
+    agg_stats = []
+    for agg_level in sorted(df[agg_col].unique()):
+        data = df[df[agg_col] == agg_level]['mean_final_adoption']
+        agg_stats.append({
+            'level': agg_level,
+            'mean': data.mean(),
+            'std': data.std(),
+            'min': data.min(),
+            'max': data.max(),
+        })
+    
+    agg_df = pd.DataFrame(agg_stats)
+    print(agg_df.to_string(index=False))
+    
+    return threshold_df, agg_df
+
+
+def plot_distributions(df, use_order=True, save_path='distribution_plots.png'):
+    """
+    Create distribution plots: histograms and box plots
+    """
+    print("\nCreating distribution plots...")
+    
+    if use_order and 'order' in df.columns:
+        agg_col = 'order'
+    else:
+        agg_col = 'network'
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    colors = ['#F4E04D', '#4CAF50', '#42A5F5', '#FF5722']
+    
+    # 1. Histograms by threshold
+    ax = axes[0, 0]
+    for idx, threshold in enumerate(sorted(df['threshold_value'].unique())):
+        data = df[df['threshold_value'] == threshold]['mean_final_adoption']
+        ax.hist(data, bins=20, alpha=0.6, label=f'{threshold:.3f}', 
+                color=colors[idx % len(colors)], edgecolor='white')
+    ax.set_xlabel('Final Adoption', fontsize=11)
+    ax.set_ylabel('Frequency', fontsize=11)
+    ax.set_title('Distribution by Threshold', fontsize=12, fontweight='bold')
+    ax.legend(title='Threshold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # 2. Box plots by threshold
+    ax = axes[0, 1]
+    threshold_data = [df[df['threshold_value'] == t]['mean_final_adoption'].values 
+                      for t in sorted(df['threshold_value'].unique())]
+    bp = ax.boxplot(threshold_data, labels=[f'{t:.3f}' for t in sorted(df['threshold_value'].unique())],
+                    patch_artist=True)
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    ax.set_xlabel('Threshold', fontsize=11)
+    ax.set_ylabel('Final Adoption', fontsize=11)
+    ax.set_title('Box Plot by Threshold', fontsize=12, fontweight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # 3. Histograms by aggregation level
+    ax = axes[1, 0]
+    agg_levels = sorted(df[agg_col].unique())
+    for idx, agg_level in enumerate(agg_levels):
+        data = df[df[agg_col] == agg_level]['mean_final_adoption']
+        label = f'{agg_level}'
+        if use_order and 'network' in df.columns:
+            network_name = df[df[agg_col] == agg_level]['network'].iloc[0]
+            label = f'{agg_level} ({network_name})'
+        ax.hist(data, bins=20, alpha=0.6, label=label,
+                color=colors[idx % len(colors)], edgecolor='white')
+    ax.set_xlabel('Final Adoption', fontsize=11)
+    ax.set_ylabel('Frequency', fontsize=11)
+    ax.set_title('Distribution by Aggregation Level', fontsize=12, fontweight='bold')
+    ax.legend(title='Level')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # 4. Box plots by aggregation level
+    ax = axes[1, 1]
+    agg_data = [df[df[agg_col] == level]['mean_final_adoption'].values 
+                for level in agg_levels]
+    labels = [str(level) for level in agg_levels]
+    bp = ax.boxplot(agg_data, labels=labels, patch_artist=True)
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    ax.set_xlabel('Aggregation Level', fontsize=11)
+    ax.set_ylabel('Final Adoption', fontsize=11)
+    ax.set_title('Box Plot by Aggregation Level', fontsize=12, fontweight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Distribution plots saved to: {save_path}")
+    plt.show()
+
+
+def plot_distributions_per_threshold(df, use_order=True, save_dir='threshold_plots'):
+    """
+    Create simple plots for each threshold
+    """
+    print("\nCreating per-threshold plots...")
+    
+    if use_order and 'order' in df.columns:
+        agg_col = 'order'
+    else:
+        agg_col = 'network'
+    
+    import os
+    from scipy import stats
+    os.makedirs(save_dir, exist_ok=True)
+    
+    colors = ['#F4E04D', '#4CAF50', '#42A5F5']
+    threshold_labels = ["low", "medium", "high"]
+    agg_levels = sorted(df[agg_col].unique())
+    
+    for idx, threshold in enumerate(sorted(df['threshold_value'].unique())):
+        threshold_data = df[df['threshold_value'] == threshold]
+        threshold_label = threshold_labels[idx]
+        color = colors[idx]
+        
+        fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+        fig.suptitle(f'Threshold: {threshold_label}', fontsize=13, fontweight='bold')
+        
+        # Calculate y-axis limits from mean ± std data
+        means = [threshold_data[threshold_data[agg_col] == level]['mean_final_adoption'].mean() 
+                for level in agg_levels]
+        stds = [threshold_data[threshold_data[agg_col] == level]['mean_final_adoption'].std() 
+               for level in agg_levels]
+        y_min = min([m - s for m, s in zip(means, stds)])
+        y_max = max([m + s for m, s in zip(means, stds)])
+        y_margin = (y_max - y_min) * 0.1
+        y_limits = [y_min - y_margin, y_max + y_margin]
+        
+        # 1. Histogram
+        ax = axes[0, 0]
+        data = threshold_data['mean_final_adoption']
+        ax.hist(data, bins=20, color=color, alpha=0.7, edgecolor='white')
+        ax.axvline(data.mean(), color='red', linestyle='--', linewidth=2)
+        ax.set_xlabel('Final Adoption')
+        ax.set_ylabel('Frequency')
+        ax.set_title('Distribution')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        # 2. Box plots by aggregation
+        ax = axes[0, 1]
+        agg_data = [threshold_data[threshold_data[agg_col] == level]['mean_final_adoption'].values 
+                   for level in agg_levels]
+        bp = ax.boxplot(agg_data, labels=[str(l) for l in agg_levels], patch_artist=True)
+        for patch in bp['boxes']:
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+        ax.set_xlabel('Aggregation Level')
+        ax.set_ylabel('Final Adoption')
+        ax.set_title('By Aggregation')
+        ax.set_ylim(y_limits)
+        ax.tick_params(axis='x', rotation=45)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        # 3. KDE by aggregation
+        ax = axes[1, 0]
+        for i, level in enumerate(agg_levels):
+            level_data = threshold_data[threshold_data[agg_col] == level]['mean_final_adoption']
+            if len(level_data) > 1:
+                kde = stats.gaussian_kde(level_data)
+                x_range = np.linspace(data.min(), data.max(), 100)
+                ax.plot(x_range, kde(x_range), linewidth=2, label=f'{level}')
+        ax.set_xlabel('Final Adoption')
+        ax.set_ylabel('Density')
+        ax.set_title('Density by Level')
+        ax.legend(title='Level', fontsize=8)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        # 4. Mean ± std
+        ax = axes[1, 1]
+        ax.errorbar(agg_levels, means, yerr=stds, fmt='o-', color=color, 
+                   markersize=8, linewidth=2, capsize=5)
+        ax.set_xlabel('Aggregation Level')
+        ax.set_ylabel('Mean ± SD')
+        ax.set_title('Summary')
+        ax.set_ylim(y_limits)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        save_path = f'{save_dir}/threshold_{threshold_label}.png'
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  Saved: {save_path}")
+        plt.close()
+    
+    print(f"Saved to: {save_dir}/")
+
+
+def compare_distributions(df, use_order=True):
+    """
+    Simple statistical comparisons
+    """
+    print("\n" + "="*60)
+    print("STATISTICAL TESTS")
+    print("="*60)
+    
+    from scipy import stats
+    
+    if use_order and 'order' in df.columns:
+        agg_col = 'order'
+    else:
+        agg_col = 'network'
+    
+    agg_levels = sorted(df[agg_col].unique())
+    
+    for threshold in sorted(df['threshold_value'].unique()):
+        threshold_data = df[df['threshold_value'] == threshold]
+        
+        print(f"\nThreshold {threshold:.3f}:")
+        
+        # Test if distributions differ across aggregation levels
+        level_data = [threshold_data[threshold_data[agg_col] == level]['mean_final_adoption'].values 
+                     for level in agg_levels]
+        
+        # Kruskal-Wallis test (non-parametric)
+        if len(agg_levels) > 2:
+            h_stat, p_val = stats.kruskal(*level_data)
+            print(f"  Kruskal-Wallis: H={h_stat:.2f}, p={p_val:.4f}")
+            if p_val < 0.05:
+                print(f"  → Distributions differ across levels")
+            else:
+                print(f"  → No significant difference")
+    
+    return None
+
+
+def plot_variance_decomposition(variance_df, save_path='variance_decomposition.png'):
+    """
+    Simple between vs within variance comparison
+    """
+    print("\nCreating variance decomposition plots...")
+    
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    colors = ['#F4E04D', '#4CAF50', '#42A5F5']
+    threshold_labels = ["low", "medium", "high"]
+    
+    plot_df = variance_df.copy()
+    agg_levels = sorted(plot_df['aggregation_level'].unique())
+    
+    # 1. Between Variance (Structural)
+    ax = axes[0]
+    for idx, threshold in enumerate(sorted(plot_df['threshold'].unique())):
+        data = plot_df[plot_df['threshold'] == threshold]
+        agg_avg = data.groupby('aggregation_level')['between_sd'].mean()
+        
+        ax.plot(agg_levels, agg_avg.values, 'o-', 
+               color=colors[idx], linewidth=2.5, markersize=8,
+               label=threshold_labels[idx])
+    
+    ax.set_xlabel('Aggregation Level', fontsize=11)
+    ax.set_ylabel('Between-Network SD', fontsize=11)
+    ax.set_title('Structural Uncertainty', fontsize=12, fontweight='bold')
+    ax.legend(title='Threshold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(True, alpha=0.3)
+    
+    # 2. Within Variance (Stochastic)
+    ax = axes[1]
+    for idx, threshold in enumerate(sorted(plot_df['threshold'].unique())):
+        data = plot_df[plot_df['threshold'] == threshold]
+        agg_avg = data.groupby('aggregation_level')['within_sd'].mean()
+        
+        ax.plot(agg_levels, agg_avg.values, 'o-', 
+               color=colors[idx], linewidth=2.5, markersize=8,
+               label=threshold_labels[idx])
+    
+    ax.set_xlabel('Aggregation Level', fontsize=11)
+    ax.set_ylabel('Within-Network SD', fontsize=11)
+    ax.set_title('Stochastic Uncertainty', fontsize=12, fontweight='bold')
+    ax.legend(title='Threshold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Saved: {save_path}")
+    plt.show()
+
+
+def print_variance_interpretation(variance_df):
+    """
+    Simple summary of variance components
+    """
+    print("\n" + "="*60)
+    print("BETWEEN vs WITHIN VARIANCE")
+    print("="*60)
+    
+    print("\nBETWEEN = Structural uncertainty (network choice)")
+    print("WITHIN  = Stochastic uncertainty (randomness)")
+    
+    summary = variance_df.groupby('aggregation_level').agg({
+        'between_sd': 'mean',
+        'within_sd': 'mean',
+        'pct_structural': 'mean',
+    }).round(3)
+    
+    summary = summary.sort_index()
+    print("\n", summary.to_string())
+    
+    # Trend
+    levels = sorted(summary.index)
+    if len(levels) >= 2:
+        first, last = levels[0], levels[-1]
+        between_pct = ((summary.loc[last, 'between_sd'] / summary.loc[first, 'between_sd']) - 1) * 100
+        print(f"\nBetween variance: {between_pct:+.0f}% from level {first} → {last}")
+
+
 def plot_results(variance_df, test_results=None, save_path='variance_plot.png'):
     """Create simple, beautiful plots with both linear and log fits"""
     print("\nCreating plots...")
@@ -302,7 +657,7 @@ def plot_results(variance_df, test_results=None, save_path='variance_plot.png'):
     # Get unique aggregation levels
     agg_levels = sorted(plot_df['aggregation_level'].unique())
     
-    thresholds = ["low", "med-low", "med-high", "high"]
+    thresholds = ["low", "medium", "high"]
     
     # Prepare x values for smooth curves
     if len(agg_levels) > 1:
@@ -310,13 +665,17 @@ def plot_results(variance_df, test_results=None, save_path='variance_plot.png'):
     
     # 1. Between-network CV
     ax = axes[0]
-    plot_df['threshold'] = round(plot_df['threshold'], 2)
+    plot_df['threshold'] = round(plot_df['threshold'], 3)
     
     for idx, threshold in enumerate(sorted(plot_df['threshold'].unique())):
         color = colors[idx % len(colors)]
         data = plot_df[plot_df['threshold'] == threshold]
         agg_avg = data.groupby('aggregation_level')['cv_between'].mean()
         threshold_label = thresholds[idx]
+        print(threshold)
+        print(agg_avg)
+
+
         
         # Scatter points
         ax.scatter(agg_levels, agg_avg.values, 
@@ -490,7 +849,7 @@ def calculate_variance_by_structure(df, use_order=True):
     return structure_df
 
 
-def main(file_path, show_structure_breakdown=False):
+def main(file_path, show_structure_breakdown=False, show_distributions=True):
     """
     Main analysis function
     
@@ -500,6 +859,8 @@ def main(file_path, show_structure_breakdown=False):
         Path to CSV file
     show_structure_breakdown : bool
         If True, also show variance separately for each network structure
+    show_distributions : bool
+        If True, show distribution analysis and plots
     """
     print("="*60)
     print("VARIANCE ANALYSIS")
@@ -521,8 +882,24 @@ def main(file_path, show_structure_breakdown=False):
     # Test H1 (now returns list of results for all thresholds)
     test_results = test_h1(variance_df)
     
+    # Variance decomposition analysis
+    print_variance_interpretation(variance_df)
+    plot_variance_decomposition(variance_df)
+    
     # Summary table
     print_summary(variance_df)
+    
+    # Distribution analysis
+    if show_distributions:
+        threshold_stats, agg_stats = analyze_distributions(df, use_order=use_order)
+        plot_distributions(df, use_order=use_order)
+        plot_distributions_per_threshold(df, use_order=use_order)
+        comparison_df = compare_distributions(df, use_order=use_order)
+        
+        # Save distribution stats
+        threshold_stats.to_csv('distribution_by_threshold.csv', index=False)
+        agg_stats.to_csv('distribution_by_aggregation.csv', index=False)
+        print("\nDistribution statistics saved to CSV files")
     
     # Optional: Show breakdown by structure
     if show_structure_breakdown:
@@ -555,7 +932,7 @@ if __name__ == "__main__":
     # Script automatically uses 'order' column if available
     # (low order = fine/granular, high order = coarse/aggregated)
     
-    df, variance_df, results = main('modeling/analysis/parameter_sweep/checkpoint_sweep_0.1_4.csv')
+    df, variance_df, results = main('modeling/analysis/parameter_sweep/combined_tasks.csv')
 
     
     # Optional: Show breakdown by network structure
