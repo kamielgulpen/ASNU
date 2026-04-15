@@ -729,14 +729,20 @@ fn process_nodes_capacity_sparse<'py>(
     // ── Sparse neighbour lists built from budget (O(nnz)) ─────────────────
     // nbrs_row[g] = [(h, target[g,h]), ...] — groups g sends interactions toward
     // nbrs_col[g] = [(h, target[h,g]), ...] — groups that send toward g (h ≠ g)
+    // budget_nbrs[g] = set of h where target[g,h]>0 OR target[h,g]>0
+    //   — used to filter acc_sym updates so only budget-relevant pairs are stored,
+    //     keeping acc_sym O(nnz) instead of O(n_groups²).
     let mut nbrs_row: Vec<Vec<(usize, i64)>> = vec![Vec::new(); n_groups];
     let mut nbrs_col: Vec<Vec<(usize, i64)>> = vec![Vec::new(); n_groups];
+    let mut budget_nbrs: Vec<HashSet<usize>> = vec![HashSet::new(); n_groups];
     for (&(sg, dg), &val) in &budget {
         if val <= 0 { continue; }
         let sg = sg as usize;
         let dg = dg as usize;
         if sg < n_groups && dg < n_groups {
             nbrs_row[sg].push((dg, val));
+            budget_nbrs[sg].insert(dg);
+            budget_nbrs[dg].insert(sg);
             if sg != dg {
                 nbrs_col[dg].push((sg, val));
             }
@@ -889,18 +895,22 @@ fn process_nodes_capacity_sparse<'py>(
         };
 
         // ── Update acc_sym (collect first to avoid simultaneous borrows) ──
+        // Only track pairs where a budget entry exists — acc_sym entries for
+        // non-budget pairs are never read, so storing them wastes memory and
+        // causes O(n_groups²) growth even in the sparse case.
         {
             let updates: Vec<(usize, i64)> = comp_by_comm[best_comm]
                 .iter()
                 .map(|(&h, &cnt)| (h, cnt))
                 .collect();
             for (h, cnt) in updates {
-                if h != g {
+                if h == g {
+                    *acc_sym[g].entry(g).or_insert(0) += 2 * cnt;
+                } else if budget_nbrs[g].contains(&h) {
                     *acc_sym[g].entry(h).or_insert(0) += cnt;
                     *acc_sym[h].entry(g).or_insert(0) += cnt;
-                } else {
-                    *acc_sym[g].entry(g).or_insert(0) += 2 * cnt;
                 }
+                // No budget link between g and h — skip; value is never read.
             }
         }
 
