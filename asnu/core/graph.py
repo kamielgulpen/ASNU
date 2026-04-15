@@ -310,3 +310,4 @@ class NetworkXGraph:
             num_nodes=self.graph.number_of_nodes(),
             directed=self.graph.is_directed()
         )
+

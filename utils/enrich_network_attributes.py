@@ -12,6 +12,17 @@ Key optimizations:
 """
 
 import argparse
+import json
+import shutil
+from collections import Counter, defaultdict
+from pathlib import Path
+import sys
+
+import numpy as np
+import networkx as nx
+
+
+import argparse
 import pickle
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -706,6 +717,66 @@ def print_stats(G, encodings: dict = None) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────
+# COMPACT I/O (edges.npy + node_attrs.npy)
+# ─────────────────────────────────────────────────────────────────
+
+def _load_graph_from_dir(input_dir: Path) -> nx.DiGraph:
+    """Load nx.DiGraph from edges.npy + metadata.json."""
+    meta_path = input_dir / "metadata.json"
+    edges_path = input_dir / "edges.npy"
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    num_nodes     = meta['num_nodes']
+    nodes_to_group = {int(k): v for k, v in meta['nodes_to_group'].items()}
+    group_to_attrs = meta['group_to_attrs']
+
+    G = nx.DiGraph()
+    for node_id in range(num_nodes):
+        group_id = nodes_to_group.get(node_id)
+        attrs = group_to_attrs.get(str(group_id), {}) if group_id is not None else {}
+        G.add_node(node_id, **attrs)
+
+    edges = np.load(edges_path)
+    if edges.size > 0:
+        G.add_edges_from(edges.tolist())
+
+    return G
+
+
+def _save_enriched_graph(G: nx.DiGraph, output_dir: Path, input_dir: Path) -> None:
+    """
+    Save enriched graph compactly:
+      edges.npy        — edge list (int32), copied from input (topology unchanged)
+      node_attrs.npy   — per-node integer-encoded attributes (int16, shape N×len(GROUP_KEYS))
+      node_attrs_keys.json — column order for node_attrs.npy
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Topology is unchanged by enrichment — just copy the edge file
+    shutil.copy2(input_dir / "edges.npy", output_dir / "edges.npy")
+
+    # Save per-node integer-encoded attributes as a compact 2-D array
+    n_nodes = G.number_of_nodes()
+    n_attrs = len(GROUP_KEYS)
+    node_attrs = np.full((n_nodes, n_attrs), -1, dtype=np.int16)
+
+    nodes_data = G.nodes
+    for node_id in range(n_nodes):
+        for col_idx, key in enumerate(GROUP_KEYS):
+            val = nodes_data[node_id].get(key, -1)
+            node_attrs[node_id, col_idx] = int(val) if val != -1 else -1
+
+    np.save(output_dir / "node_attrs.npy", node_attrs)
+
+    with open(output_dir / "node_attrs_keys.json", 'w') as f:
+        json.dump(GROUP_KEYS, f)
+
+    print(f"  edges.npy copied, node_attrs.npy ({n_nodes} nodes × {n_attrs} attrs) → {output_dir}")
+
+
+# ─────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────
 
@@ -720,8 +791,8 @@ def main():
     parser.add_argument("--encoding-dir", default="Data/enriched/encodings")
     args = parser.parse_args()
 
-    input_path   = Path(args.input)
-    output_path  = Path(args.output)
+    input_dir    = Path(args.input)
+    output_dir   = Path(args.output)
     csv_path     = Path(args.csv)
     pop_csv_path = Path(args.pop_csv)
     encoding_dir = Path(args.encoding_dir)

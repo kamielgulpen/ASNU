@@ -6,7 +6,6 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from asnu import generate, create_communities, check_group_interactions, plot_group_interactions
 import time
-import pickle
 from scipy import stats
 
 # Generate network
