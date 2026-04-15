@@ -430,14 +430,48 @@ fn run_edge_creation(
 }
 
 
-/// Unified community assignment based on edge-budget fulfillment.
+/// Soft-penalty cost for remaining edge budget.
+/// Overshoot (negative remainder) is penalised 10×.
+#[inline(always)]
+fn comm_cost(x: f64) -> f64 {
+    if x >= 0.0 { x * x } else { 10.0 * x * x }
+}
+
+/// SA softmax selection over `(community_id, distance)` candidates.
+fn sa_select(candidates: &[(usize, f64)], temperature: f64, rng: &mut impl Rng) -> usize {
+    if temperature > 0.05 {
+        let valid: Vec<_> = candidates.iter().filter(|&&(_, d)| d.is_finite()).collect();
+        match valid.len() {
+            0 => candidates.last().map(|&(i, _)| i).unwrap_or(0),
+            1 => valid[0].0,
+            _ => {
+                let t = temperature + 1e-10;
+                let max_neg = valid.iter().map(|&&(_, d)| -d / t).fold(f64::NEG_INFINITY, f64::max);
+                let weights: Vec<f64> = valid.iter()
+                    .map(|&&(_, d)| ((-d / t) - max_neg).exp())
+                    .collect();
+                valid[WeightedIndex::new(&weights).unwrap().sample(rng)].0
+            }
+        }
+    } else {
+        candidates.iter()
+            .filter(|&&(_, d)| d.is_finite())
+            .min_by(|&&(_, a), &&(_, b)| a.partial_cmp(&b).unwrap())
+            .map(|&(i, _)| i)
+            .unwrap_or_else(|| candidates.last().map(|&(i, _)| i).unwrap_or(0))
+    }
+}
+
+
+/// Sparse-SA community assignment based on edge-budget fulfillment.
 ///
-/// `new_comm_penalty` controls eagerness to open new communities:
-///   1.0   → no penalty (many small communities, low degree)
-///   3.0   → moderate penalty (default, ~3× larger communities)
-///   large → nodes strongly prefer existing communities (fewer, larger)
+/// Each node joins the community that best fulfills the edge-budget targets
+/// for its group.  Only communities that share at least one budget-neighbour
+/// with the current node's group are evaluated ("warm set"); all others share
+/// the same baseline distance and are never preferred over warm ones.
 ///
-/// Optimized: flat 2D arrays, only evaluates active (non-empty) communities.
+/// Memory: O(communities × avg_groups_per_community + budget_pairs)
+/// instead of the previous O(communities × n_groups + n_groups²).
 #[pyfunction]
 #[pyo3(signature = (all_nodes, node_groups, budget, n_groups, initial_num_communities, target_counts=None, total_nodes=0, new_comm_penalty=3.0, initial_comp=None))]
 fn process_nodes_capacity<'py>(
@@ -452,306 +486,176 @@ fn process_nodes_capacity<'py>(
     new_comm_penalty: f64,
     initial_comp: Option<HashMap<usize, HashMap<usize, i64>>>,
 ) -> PyResult<Bound<'py, PyArray1<i64>>> {
-    let _all_nodes = all_nodes.as_array();
+    let _ = (all_nodes, initial_num_communities);
     let node_groups = node_groups.as_array();
     let tc: Option<Array1<i32>> = target_counts.map(|t| t.as_array().to_owned());
-
     let mut rng = thread_rng();
-    let mut assignments: Vec<i64> = Vec::with_capacity(total_nodes);
 
-    // ── Sparse neighbour lists from budget ────────────────────────────────
+    // ── Sparse budget neighbour lists ─────────────────────────────────────
+    // nbrs_row[g] = [(h, target[g→h])]  nbrs_col[g] = [(h, target[h→g]), h≠g]
     let mut nbrs_row: Vec<Vec<(usize, i64)>> = vec![Vec::new(); n_groups];
     let mut nbrs_col: Vec<Vec<(usize, i64)>> = vec![Vec::new(); n_groups];
     let mut budget_nbrs: Vec<Vec<usize>> = vec![Vec::new(); n_groups];
     for (&(sg, dg), &val) in &budget {
         if val <= 0 { continue; }
-        let sg_u = sg as usize;
-        let dg_u = dg as usize;
-        if sg_u < n_groups && dg_u < n_groups {
-            nbrs_row[sg_u].push((dg_u, val));
-            budget_nbrs[sg_u].push(dg_u);
-            budget_nbrs[dg_u].push(sg_u);
-            if sg_u != dg_u {
-                nbrs_col[dg_u].push((sg_u, val));
-            }
+        let sg = sg as usize;
+        let dg = dg as usize;
+        if sg < n_groups && dg < n_groups {
+            nbrs_row[sg].push((dg, val));
+            budget_nbrs[sg].push(dg);
+            budget_nbrs[dg].push(sg);
+            if sg != dg { nbrs_col[dg].push((sg, val)); }
         }
     }
-    for v in &mut budget_nbrs {
-        if v.len() > 1 { v.sort_unstable(); v.dedup(); }
-        v.shrink_to_fit();
-    }
+    for v in &mut budget_nbrs { v.sort_unstable(); v.dedup(); v.shrink_to_fit(); }
 
-    // ── Community storage (dense flat arrays) ─────────────────────────────
-    let max_communities = (initial_num_communities + initial_num_communities / 4).max(1);
-    let mut comp: Vec<i64> = vec![0; max_communities * n_groups];
-    let mut community_sizes: Vec<i64> = vec![0; max_communities];
-    let mut num_active: usize = initial_num_communities;
-    let mut capacity: usize = max_communities;
-
-    // ── Inverted index for warm-set lookup ────────────────────────────────
-    // comms_with_group[h] = list of community ids currently containing
-    // ≥1 member of group h. Maintained via the 0→1 transition check
-    // when a node joins a community. Vec<Vec> (not Vec<HashSet>) because
-    // we only iterate it, never query .contains.
-    let mut comms_with_group: Vec<Vec<usize>> = vec![Vec::new(); n_groups];
+    // -- Community state (sparse) --
+    let seed_count = initial_comp.as_ref().map(|ic| ic.len()).unwrap_or(0);
+    let mut comp: Vec<HashMap<usize, i64>>  = Vec::with_capacity(seed_count.max(16));
+    let mut comm_sizes: Vec<i64>            = Vec::with_capacity(seed_count.max(16));
+    let mut num_active: usize = 0;
+    let mut comms_with_group: HashMap<usize, Vec<usize>> = HashMap::new();
 
     if let Some(ref ic) = initial_comp {
-        for (&comm_id, comp_dict) in ic {
-            if comm_id < capacity {
-                for (&group_id, &count) in comp_dict {
-                    if group_id < n_groups && count > 0 {
-                        comp[comm_id * n_groups + group_id] += count;
-                        community_sizes[comm_id] += count;
-                        comms_with_group[group_id].push(comm_id);
+        while comp.len() < ic.len() { comp.push(HashMap::new()); comm_sizes.push(0); }
+        for (&cid, dict) in ic {
+            if cid < comp.len() {
+                for (&gid, &cnt) in dict {
+                    if gid < n_groups && cnt > 0 {
+                        *comp[cid].entry(gid).or_insert(0) += cnt;
+                        comm_sizes[cid] += cnt;
+                        comms_with_group.entry(gid).or_default().push(cid);
                     }
                 }
             }
         }
+        num_active = ic.len();
     }
 
-    // Accumulated edge counts. APPROXIMATION: only updated for budget pairs
-    // (optimization #3). Non-budget acc entries stay at 0 forever.
-    let mut acc: Vec<i64> = vec![0; n_groups * n_groups];
+    // -- acc_sym[g][h]: accumulated edge-opportunities, sparse, O(budget_pairs) --
+    let mut acc_sym: HashMap<usize, HashMap<usize, i64>> = HashMap::new();
 
-    const OVERSHOOT_PENALTY: f64 = 1.0;
     const MAX_EVAL: usize = 500;
-    #[inline(always)]
-    fn cost_with(rem: f64) -> f64 {
-        if rem < 0.0 { OVERSHOOT_PENALTY * rem * rem } else { rem * rem }
-    }
-
-    // ── Reusable per-node buffers (allocated once, reused 800k times) ─────
-    let mut row_cache: Vec<(usize, i64, i64, f64)> = Vec::new();
-    let mut col_cache: Vec<(usize, i64, i64, f64)> = Vec::new();
-    let mut warm_list: Vec<usize> = Vec::new();
-    let mut is_warm: Vec<bool> = vec![false; capacity];
-    let mut warm_eval_ids: Vec<usize> = Vec::new();
-    let mut warm_eval_distances: Vec<f64> = Vec::new();
-    let mut weights: Vec<f64> = Vec::new();
+    let mut warm:       Vec<usize>        = Vec::new();
+    let mut seen:       HashSet<usize>    = HashSet::new();
+    let mut candidates: Vec<(usize, f64)> = Vec::new();
+    let mut assignments: Vec<i64>         = Vec::with_capacity(total_nodes);
 
     for node_idx in 0..total_nodes {
         let g = node_groups[node_idx] as usize;
 
-        // ── Sparse caches over budget neighbours of g ─────────────────────
-        // (h, target, acc, old_sq) — old_sq is constant across all c, so
-        // cache it instead of recomputing in every per-community loop.
-        row_cache.clear();
-        for &(h, tv) in &nbrs_row[g] {
-            let acc_gh = acc[g * n_groups + h];
-            let rem = (tv - acc_gh) as f64;
-            row_cache.push((h, tv, acc_gh, rem * rem));
-        }
-        col_cache.clear();
-        for &(h, tv) in &nbrs_col[g] {
-            let acc_hg = acc[h * n_groups + g];
-            let rem = (tv - acc_hg) as f64;
-            col_cache.push((h, tv, acc_hg, rem * rem));
-        }
-        let base_total: f64 = row_cache.iter().map(|t| t.3).sum::<f64>()
-                            + col_cache.iter().map(|t| t.3).sum::<f64>();
-
-        // ── Build WARM SET via inverted index ─────────────────────────────
-        // Communities not in the warm set have delta = 0, so dist = √base.
-        // Reset previous warm flags (O(|prev warm|), no full memset).
-        for &c in &warm_list { is_warm[c] = false; }
-        warm_list.clear();
-        for &h in &budget_nbrs[g] {
-            for &c in &comms_with_group[h] {
-                if c < num_active && !is_warm[c] {
-                    is_warm[c] = true;
-                    warm_list.push(c);
-                }
-            }
-        }
-
-        // Cap work: if too many warm, sample MAX_EVAL of them. The dropped
-        // ones are unmarked so they fall into the cold bucket below.
-        if warm_list.len() > MAX_EVAL {
-            warm_list.partial_shuffle(&mut rng, MAX_EVAL);
-            for &c in &warm_list[MAX_EVAL..] { is_warm[c] = false; }
-            warm_list.truncate(MAX_EVAL);
-        }
-
-        // ── Evaluate each warm community (with cap check) ─────────────────
-        warm_eval_ids.clear();
-        warm_eval_distances.clear();
-        for &c in &warm_list {
-            if let Some(ref tc_ref) = tc {
-                if c < tc_ref.len() && community_sizes[c] as i32 >= tc_ref[c] {
-                    continue; // capped
-                }
-            }
-            let c_offset = c * n_groups;
-            let mut delta: f64 = 0.0;
-
-            for &(h, tv, acc_gh, old_sq) in &row_cache {
-                let count_h = comp[c_offset + h];
-                if count_h == 0 { continue; }
-                let new_rem = if h == g {
-                    (tv - acc_gh - 2 * count_h) as f64
-                } else {
-                    (tv - acc_gh - count_h) as f64
-                };
-                delta += cost_with(new_rem) - old_sq;
-            }
-            for &(h, tv, acc_hg, old_sq) in &col_cache {
-                let count_h = comp[c_offset + h];
-                if count_h == 0 { continue; }
-                let new_rem = (tv - acc_hg - count_h) as f64;
-                delta += cost_with(new_rem) - old_sq;
-            }
-
-            warm_eval_ids.push(c);
-            warm_eval_distances.push((base_total + delta).sqrt());
-        }
-
-        let cold_dist = base_total.sqrt();
-        let new_dist = cold_dist * new_comm_penalty;
-
-        // ── Cold count (communities not warm and not capped) ──────────────
-        // O(1) when no caps; O(num_active) only when target_counts present.
-        let cold_count: usize = if let Some(ref tc_ref) = tc {
-            let mut count: usize = 0;
-            for c in 0..num_active {
-                if is_warm[c] { continue; }
-                if c < tc_ref.len() && community_sizes[c] as i32 >= tc_ref[c] { continue; }
-                count += 1;
-            }
-            count
-        } else {
-            num_active.saturating_sub(warm_list.len())
-        };
-
-        // ── SA selection: warm + cold-bucket + new ────────────────────────
-        // chosen_marker scheme:
-        //   0..n_warm                  → warm_eval_ids[chosen_marker]
-        //   n_warm  (if cold_present)  → cold bucket (rejection-sampled)
-        //   last                       → new community
-        let temperature: f64 = 1.0 - (node_idx as f64 / total_nodes as f64);
-        let n_warm = warm_eval_ids.len();
-        let cold_present = cold_count > 0;
-        let new_marker = if cold_present { n_warm + 1 } else { n_warm };
-
-        let chosen_marker = if temperature > 0.05 {
-            weights.clear();
-            let scale = -1.0 / (temperature + 1e-10);
-
-            // Numerical stability: subtract max
-            let mut max_neg = f64::NEG_INFINITY;
-            for &d in &warm_eval_distances {
-                let v = d * scale;
-                if v > max_neg { max_neg = v; }
-            }
-            if cold_present {
-                let v = cold_dist * scale;
-                if v > max_neg { max_neg = v; }
-            }
-            let v = new_dist * scale;
-            if v > max_neg { max_neg = v; }
-
-            for &d in &warm_eval_distances {
-                weights.push((d * scale - max_neg).exp());
-            }
-            if cold_present {
-                // Cold bucket weight = (count of cold communities) × per-cold weight
-                weights.push((cold_count as f64) * (cold_dist * scale - max_neg).exp());
-            }
-            weights.push((new_dist * scale - max_neg).exp());
-
-            let dist = WeightedIndex::new(&weights).unwrap();
-            dist.sample(&mut rng)
-        } else {
-            // Greedy: argmin
-            let mut best_dist = f64::INFINITY;
-            let mut best_marker: usize = new_marker;
-            for (i, &d) in warm_eval_distances.iter().enumerate() {
-                if d < best_dist { best_dist = d; best_marker = i; }
-            }
-            if cold_present && cold_dist < best_dist {
-                best_dist = cold_dist;
-                best_marker = n_warm;
-            }
-            if new_dist < best_dist {
-                best_marker = new_marker;
-            }
-            best_marker
-        };
-
-        // ── Resolve marker → community id ─────────────────────────────────
-        let mut chosen_community: usize = if chosen_marker < n_warm {
-            warm_eval_ids[chosen_marker]
-        } else if cold_present && chosen_marker == n_warm {
-            // Rejection sample uniformly among non-warm non-capped communities.
-            // Expected attempts = num_active / cold_count, bounded.
-            loop {
-                let c = rng.gen_range(0..num_active);
-                if is_warm[c] { continue; }
-                if let Some(ref tc_ref) = tc {
-                    if c < tc_ref.len() && community_sizes[c] as i32 >= tc_ref[c] { continue; }
-                }
-                break c;
-            }
-        } else {
-            num_active // sentinel → new community
-        };
-
-        // ── Allocate new community if needed ──────────────────────────────
-        if chosen_community >= num_active {
-            let new_id = num_active;
-            if new_id >= capacity {
-                let new_cap = capacity + capacity / 2 + 1;
-                comp.resize(new_cap * n_groups, 0);
-                community_sizes.resize(new_cap, 0);
-                is_warm.resize(new_cap, false);
-                capacity = new_cap;
-            }
-            num_active += 1;
-            chosen_community = new_id;
-        }
-
-        // ── Update acc — only budget-relevant pairs (optimization #3) ─────
+        // -- Baseline: cost of g joining an empty community --
+        let mut base_sq = 0.0f64;
         {
-            let c_offset = chosen_community * n_groups;
-            for &h in &budget_nbrs[g] {
-                let count_h = comp[c_offset + h];
-                if count_h == 0 { continue; }
-                if h == g {
-                    acc[g * n_groups + g] += 2 * count_h;
-                } else {
-                    acc[g * n_groups + h] += count_h;
-                    acc[h * n_groups + g] += count_h;
-                }
+            let g_acc = acc_sym.get(&g);
+            for &(h, tv) in &nbrs_row[g] {
+                let av = g_acc.and_then(|m| m.get(&h)).copied().unwrap_or(0) as f64;
+                base_sq += comm_cost(tv as f64 - av);
+            }
+            for &(h, tv) in &nbrs_col[g] {
+                let av = g_acc.and_then(|m| m.get(&h)).copied().unwrap_or(0) as f64;
+                base_sq += comm_cost(tv as f64 - av);
             }
         }
 
-        // ── Update composition + inverted index ───────────────────────────
-        let was_present = comp[chosen_community * n_groups + g] > 0;
-        comp[chosen_community * n_groups + g] += 1;
-        community_sizes[chosen_community] += 1;
-        if !was_present {
-            comms_with_group[g].push(chosen_community);
+        // -- Warm set --
+        warm.clear();
+        seen.clear();
+        for &(h, _) in nbrs_row[g].iter().chain(nbrs_col[g].iter()) {
+            if let Some(cs) = comms_with_group.get(&h) {
+                for &c in cs {
+                    if c < num_active && seen.insert(c) { warm.push(c); }
+                }
+            }
+        }
+        if warm.len() > MAX_EVAL {
+            warm.partial_shuffle(&mut rng, MAX_EVAL);
+            warm.truncate(MAX_EVAL);
         }
 
-        assignments.push(chosen_community as i64);
+        // -- Candidates: warm communities + new community --
+        candidates.clear();
+        {
+            let g_acc = acc_sym.get(&g);
+            for &c in &warm {
+                if let Some(ref tc_arr) = tc {
+                    if c < tc_arr.len() && comm_sizes[c] as i32 >= tc_arr[c] { continue; }
+                }
+                let c_comp = &comp[c];
+                let mut delta = 0.0f64;
+                for &(h, tv) in &nbrs_row[g] {
+                    let cnt = c_comp.get(&h).copied().unwrap_or(0);
+                    if cnt == 0 { continue; }
+                    let av = g_acc.and_then(|m| m.get(&h)).copied().unwrap_or(0) as f64;
+                    let tv = tv as f64;
+                    delta += if h == g {
+                        comm_cost(tv - av - 2.0 * cnt as f64) - comm_cost(tv - av)
+                    } else {
+                        comm_cost(tv - av - cnt as f64) - comm_cost(tv - av)
+                    };
+                }
+                for &(h, tv) in &nbrs_col[g] {
+                    let cnt = c_comp.get(&h).copied().unwrap_or(0);
+                    if cnt == 0 { continue; }
+                    let av = g_acc.and_then(|m| m.get(&h)).copied().unwrap_or(0) as f64;
+                    delta += comm_cost(tv as f64 - av - cnt as f64) - comm_cost(tv as f64 - av);
+                }
+                candidates.push((c, (base_sq + delta).max(0.0).sqrt()));
+            }
+        }
+        candidates.push((num_active, base_sq.sqrt() * new_comm_penalty));
+
+        // -- SA selection --
+        let temperature = 1.0 - (node_idx as f64 / total_nodes as f64);
+        let chosen = sa_select(&candidates, temperature, &mut rng);
+
+        let best = if chosen >= num_active {
+            comp.push(HashMap::new());
+            comm_sizes.push(0);
+            num_active += 1;
+            chosen
+        } else {
+            chosen
+        };
+
+        // -- Update acc_sym --
+        {
+            let diag_cnt = comp[best].get(&g).copied().unwrap_or(0);
+            let off: Vec<(usize, i64)> = budget_nbrs[g].iter()
+                .filter(|&&h| h != g)
+                .filter_map(|&h| comp[best].get(&h).map(|&cnt| (h, cnt)))
+                .filter(|&(_, cnt)| cnt > 0)
+                .collect();
+            if diag_cnt > 0 {
+                *acc_sym.entry(g).or_default().entry(g).or_insert(0) += 2 * diag_cnt;
+            }
+            for (h, cnt) in off {
+                *acc_sym.entry(g).or_default().entry(h).or_insert(0) += cnt;
+                *acc_sym.entry(h).or_default().entry(g).or_insert(0) += cnt;
+            }
+        }
+
+        // -- Update comp + inverted index --
+        let prev = comp[best].get(&g).copied().unwrap_or(0);
+        *comp[best].entry(g).or_insert(0) += 1;
+        comm_sizes[best] += 1;
+        if prev == 0 { comms_with_group.entry(g).or_default().push(best); }
+
+        assignments.push(best as i64);
 
         if (node_idx + 1) % 5000 == 0 {
-            let pct = 100.0 * (node_idx + 1) as f64 / total_nodes as f64;
             println!(
-                "Capacity assignment: {}/{} nodes ({:.1}%), {} active communities",
-                node_idx + 1, total_nodes, pct, num_active
+                "Capacity SA: {}/{} ({:.1}%), {} communities",
+                node_idx + 1, total_nodes,
+                100.0 * (node_idx + 1) as f64 / total_nodes as f64,
+                num_active
             );
         }
     }
 
-    println!(
-        "Capacity-based assignment complete: {} nodes -> {} active communities",
-        total_nodes, num_active
-    );
-
-    let result = Array1::from(assignments);
-    Ok(PyArray1::from_owned_array_bound(py, result))
+    println!("Capacity SA complete: {} nodes -> {} communities", total_nodes, num_active);
+    Ok(PyArray1::from_owned_array_bound(py, Array1::from(assignments)))
 }
-
 
 /// Sparse simulated annealing for large group counts.
 ///
