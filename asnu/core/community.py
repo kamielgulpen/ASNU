@@ -218,9 +218,9 @@ def populate_communities(G, num_communities, community_size_distribution='natura
     node_groups = np.array([G.nodes_to_group[n] for n in all_nodes])
 
     try:
-        from asnu_rust import process_nodes
+        from asnu_rust import process_nodes_capacity, process_nodes_capacity_sparse
         print("Using Rust backend for node processing...")
-        assignments = process_nodes(
+        assignments = process_nodes_capacity(
             all_nodes.astype(np.int64), node_groups.astype(np.int64),
             community_composition, community_sizes,
             group_exposure, ideal,
