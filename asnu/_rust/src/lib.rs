@@ -603,13 +603,25 @@ fn process_nodes_capacity<'py>(
                 candidates.push((c, (base_sq + delta).max(0.0).sqrt()));
             }
         }
-        candidates.push((num_active, base_sq.sqrt() * new_comm_penalty));
+        // Only offer a new community when allowed. Skipping this when
+        // new_comm_penalty is infinite avoids the 0.0 * inf = NaN trap
+        // that would otherwise slip through is_finite() checks.
+        if new_comm_penalty.is_finite() {
+            candidates.push((num_active, base_sq.sqrt() * new_comm_penalty));
+        }
 
         // -- SA selection --
         let temperature = 1.0 - (node_idx as f64 / total_nodes as f64);
-        let chosen = sa_select(&candidates, temperature, &mut rng);
+        let chosen = if candidates.is_empty() {
+            // Group has no warm neighbours and new communities are disallowed:
+            // assign uniformly to any existing community.
+            rng.gen_range(0..num_active.max(1))
+        } else {
+            sa_select(&candidates, temperature, &mut rng)
+        };
 
         let best = if chosen >= num_active {
+            // Only reachable when new_comm_penalty is finite (candidate was added above).
             comp.push(HashMap::new());
             comm_sizes.push(0);
             num_active += 1;
@@ -962,6 +974,113 @@ fn process_nodes_capacity_sparse<'py>(
     Ok(PyArray1::from_owned_array_bound(py, result))
 }
 
+/// Fast O(N) community assignment — no SA, uniform group distribution.
+///
+/// For each group g with p_g nodes, distributes them as evenly as possible
+/// across all K communities (floor/ceil split, randomly shuffled per group).
+/// Runs in O(N + n_groups × K) time with no HashMap lookups in the hot path.
+///
+/// Quality trade-off: all communities end up with identical demographic
+/// composition (± 1 node per group). Budget structure is ignored — the SA
+/// variants optimise jointly; this does not.
+#[pyfunction]
+#[pyo3(signature = (all_nodes, node_groups, budget, n_groups, initial_num_communities, target_counts=None, total_nodes=0, new_comm_penalty=3.0, initial_comp=None))]
+fn process_nodes_capacity_fast<'py>(
+    py: Python<'py>,
+    all_nodes: PyReadonlyArray1<'py, i64>,
+    node_groups: PyReadonlyArray1<'py, i64>,
+    budget: HashMap<(i64, i64), i64>,
+    n_groups: usize,
+    initial_num_communities: usize,
+    target_counts: Option<PyReadonlyArray1<'py, i32>>,
+    total_nodes: usize,
+    new_comm_penalty: f64,
+    initial_comp: Option<HashMap<usize, HashMap<usize, i64>>>,
+) -> PyResult<Bound<'py, PyArray1<i64>>> {
+    let _ = (all_nodes, budget, new_comm_penalty, initial_comp);
+    let node_groups = node_groups.as_array();
+    let k = initial_num_communities.max(1);
+    let mut rng = thread_rng();
+
+    let tc: Option<Vec<i32>> = target_counts.map(|t| t.as_array().to_owned().to_vec());
+
+    // Step 1: count nodes per group in one pass
+    let mut group_counts = vec![0usize; n_groups];
+    for i in 0..total_nodes {
+        let g = node_groups[i] as usize;
+        if g < n_groups {
+            group_counts[g] += 1;
+        }
+    }
+
+    // Step 2: for each group build a shuffled list of community assignments
+    let mut group_lists: Vec<Vec<usize>> = (0..n_groups)
+        .map(|g| {
+            let p = group_counts[g];
+            if p == 0 {
+                return Vec::new();
+            }
+            let mut list = Vec::with_capacity(p);
+
+            if let Some(ref tc_arr) = tc {
+                // Proportional to target community sizes
+                let total_target: i64 = tc_arr.iter().map(|&x| x as i64).sum();
+                let denom = if total_target > 0 { total_target as f64 } else { k as f64 };
+                let mut assigned = 0usize;
+                for c in 0..k {
+                    let share = if c < k - 1 {
+                        let raw = (p as f64 * tc_arr[c] as f64 / denom).round() as usize;
+                        raw.min(p - assigned)
+                    } else {
+                        p - assigned
+                    };
+                    for _ in 0..share {
+                        list.push(c);
+                    }
+                    assigned += share;
+                }
+            } else {
+                // Uniform: shuffle community order so different groups vary
+                let mut comm_order: Vec<usize> = (0..k).collect();
+                comm_order.shuffle(&mut rng);
+                let base = p / k;
+                let remainder = p % k;
+                for (i, &c) in comm_order.iter().enumerate() {
+                    let count = base + if i < remainder { 1 } else { 0 };
+                    for _ in 0..count {
+                        list.push(c);
+                    }
+                }
+            }
+
+            list.shuffle(&mut rng);
+            list
+        })
+        .collect();
+
+    // Step 3: assign each node by popping from its group's list
+    let mut group_cursors = vec![0usize; n_groups];
+    let mut assignments = Vec::with_capacity(total_nodes);
+
+    for i in 0..total_nodes {
+        let g = node_groups[i] as usize;
+        let comm = if g < n_groups && group_cursors[g] < group_lists[g].len() {
+            let c = group_lists[g][group_cursors[g]];
+            group_cursors[g] += 1;
+            c
+        } else {
+            rng.gen_range(0..k)
+        };
+        assignments.push(comm as i64);
+    }
+
+    println!(
+        "Fast assignment complete: {} nodes -> {} communities",
+        total_nodes, k
+    );
+    Ok(PyArray1::from_owned_array_bound(py, Array1::from(assignments)))
+}
+
 /// Python module
 #[pymodule]
 fn asnu_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -969,5 +1088,6 @@ fn asnu_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_edge_creation, m)?)?;
     m.add_function(wrap_pyfunction!(process_nodes_capacity, m)?)?;
     m.add_function(wrap_pyfunction!(process_nodes_capacity_sparse, m)?)?;
+    m.add_function(wrap_pyfunction!(process_nodes_capacity_fast, m)?)?;
     Ok(())
 }

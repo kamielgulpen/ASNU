@@ -554,7 +554,7 @@ def find_separated_groups(G, num_communities):
     return selected
 
 
-def populate_communities_capacity(G, num_communities, community_size_distribution='natural', new_comm_penalty=3.0, allow_new_communities=True):
+def populate_communities_capacity(G, num_communities, community_size_distribution='natural', new_comm_penalty=3.0, allow_new_communities=True, fast=False):
     """
     Assign nodes to communities by matching absolute edge counts against
     maximum_num_links budget, with feasibility constraints ensuring
@@ -674,15 +674,19 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
 
     # Try Rust backend, fall back to Python
     try:
-        from asnu_rust import process_nodes_capacity
-        print("Using Rust backend for capacity-based node processing...")
+        if fast:
+            from asnu_rust import process_nodes_capacity_fast as _rust_fn
+            print("Using Rust fast assignment (no SA)...")
+        else:
+            from asnu_rust import process_nodes_capacity as _rust_fn
+            print("Using Rust backend for capacity-based node processing...")
 
         budget = {(int(k[0]), int(k[1])): int(v) for k, v in G.maximum_num_links.items()}
         rust_initial_comp = {comm_id: {int(g): int(c) for g, c in d.items()}
                              for comm_id, d in enumerate(initial_comp)}
 
         effective_penalty = float('inf') if not allow_new_communities else new_comm_penalty
-        assignments = process_nodes_capacity(
+        assignments = _rust_fn(
             sa_nodes.astype(np.int64),
             sa_groups.astype(np.int64),
             budget,
@@ -1036,12 +1040,17 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
     else:
         if number_of_communities is None:
             number_of_communities = 100
+        fast = (mode == 'capacity_fast')
         if verbose:
-            print(f"\nAssigning nodes (penalty={new_comm_penalty}, initial communities={number_of_communities})...")
+            if fast:
+                print(f"\nAssigning nodes to {number_of_communities} communities (fast mode, no SA)...")
+            else:
+                print(f"\nAssigning nodes (penalty={new_comm_penalty}, initial communities={number_of_communities})...")
         populate_communities_capacity(G, number_of_communities,
                                       community_size_distribution=community_size_distribution,
                                       new_comm_penalty=new_comm_penalty,
-                                      allow_new_communities=allow_new_communities)
+                                      allow_new_communities=allow_new_communities,
+                                      fast=fast)
 
     if verbose:
         # Compute per-community total sizes
