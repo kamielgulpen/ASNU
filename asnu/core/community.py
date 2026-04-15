@@ -524,20 +524,19 @@ def find_separated_groups(G, num_communities):
                     G.maximum_num_links.get((best_group, g), 0)
                 )
 
-    # If more seeds are needed than unique groups, fill from least-interactive nodes
-    while len(selected) < num_communities:
-        candidates = [
-            (g, n)
-            for g in groups_with_nodes
-            for n in G.group_to_nodes[g]
-            if n not in used_nodes
-        ]
-        if not candidates:
-            break
-        candidates.sort(key=lambda gn: group_totals.get(gn[0], 0))
-        best_group, node = candidates[0]
-        selected.append((best_group, node))
-        used_nodes.add(node)
+    # If more seeds are needed than unique groups, fill from least-interactive nodes.
+    # Pre-sort once (O(n log n)) instead of rebuilding+sorting on every iteration.
+    if len(selected) < num_communities:
+        extra_candidates = sorted(
+            [(g, n) for g in groups_with_nodes for n in G.group_to_nodes[g]],
+            key=lambda gn: group_totals.get(gn[0], 0),
+        )
+        for best_group, node in extra_candidates:
+            if len(selected) >= num_communities:
+                break
+            if node not in used_nodes:
+                selected.append((best_group, node))
+                used_nodes.add(node)
 
     return selected
 
@@ -617,10 +616,23 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
     target = np.asarray(target_sp.multiply(1.0 / row_sums[:, np.newaxis]).todense())
     G.probability_matrix = target
 
-    # Build all_nodes and shuffle for pre-seeding
+    # Build all_nodes in round-robin order across groups for pre-seeding.
+    # This interleaves groups so the SA sees a balanced mix from the start.
+    # Implementation: shuffle once, then sort by within-group position so that
+    # node k of group g ends up in round k — O(n log n), no Python loops over groups.
     all_nodes = np.array(list(G.graph.nodes))
     np.random.shuffle(all_nodes)
     node_groups = np.array([G.nodes_to_group[n] for n in all_nodes])
+
+    group_counts: dict = {}
+    within_pos = np.empty(len(all_nodes), dtype=np.int64)
+    for i, g in enumerate(node_groups):
+        within_pos[i] = group_counts.get(g, 0)
+        group_counts[g] = within_pos[i] + 1
+
+    order = np.argsort(within_pos, kind='stable')
+    all_nodes = all_nodes[order]
+    node_groups = node_groups[order]
 
     # --- Pre-seed communities from least-interacting groups ---
     # find_separated_groups selects num_communities groups with minimal mutual
@@ -643,11 +655,9 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
     print(f"  Pre-seeded {len(seeds)} communities from least-interacting groups; "
           f"{sa_total_nodes} nodes remaining for SA")
 
-    # Pre-initialise community structures (use setdefault to preserve any seed assignments)
-    for community_idx in range(num_communities):
-        for group_id in range(n_groups):
-            G.communities_to_nodes.setdefault((community_idx, group_id), [])
-        G.communities_to_groups.setdefault(community_idx, [])
+    # Community structures are populated on demand via setdefault throughout the SA loop;
+    # pre-initialising every (community, group) pair is O(num_communities × n_groups)
+    # and unnecessary — omitted for large-scale performance.
 
     # Try Rust backend, fall back to Python
     try:
