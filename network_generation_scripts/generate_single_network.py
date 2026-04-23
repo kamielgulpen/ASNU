@@ -9,25 +9,32 @@ import time
 from scipy import stats
 
 # Generate network
-links = 'data/tab_werkschool.csv'
-# links = 'data/enriched/aggregated/interactions_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv'
-# links = 'data/enriched/aggregated/interactions_geslacht.csv'
+# links = 'data/enriched/aggregated/interactions_etngrp_lft_inkomensniveau_arbeidsstatus_burgerlijke_staat.csv'
+# links = 'Data/enriched/aggregated/interactions_etngrp_geslacht_lft_oplniv.csv'
+# links = 'Data/enriched/aggregated/interactions_geslacht.csv'
+links = 'Data/aggregated/tab_werkschool_etngrp_geslacht_lft_oplniv.csv'
+
 # as example we use group interaction data on a work / school layer
-# pops = 'data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv' 
-# pops  = 'data/enriched/aggregated/pop_geslacht.csv'
-pops = 'data/tab_n_(with oplniv).csv'
+# pops = 'data/enriched/aggregated/pop_etngrp_lft_inkomensniveau_arbeidsstatus_burgerlijke_staat.csv' 
+# pops  = 'Data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv.csv'
+# pops  = 'Data/enriched/aggregated/pop_geslacht.csv'
+pops = 'Data/aggregated/tab_n_etngrp_geslacht_lft_oplniv.csv'
+
+
 scale = 1
 start = time.perf_counter()
 
 # # Step 1: Create communities separately
 create_communities(
-    pops, 
-    links,
-    scale=scale, 
-    number_of_communities = int((20000)),
+    pops, links,
+    scale=scale,
+    number_of_communities=1000,
     output_path='my_communities.json',
-    mode= "capacity_fast",
-    allow_new_communities=False,
+    mode='segregation',
+    mixing_floor= 0.5,
+    isolation_threshold = 0.1
+
+    # allow_new_communities=False
 )
 
 graph = generate(
@@ -35,8 +42,8 @@ graph = generate(
     links,                            # The group-level interaction data
     preferential_attachment=0,     # Preferential attachment strength
     scale=scale,                        # Population scaling
-    reciprocity = 1,                    # Reciprocal edge probability
-    transitivity = 1,                  # Friend of a friend is my friend probability
+    reciprocity=1,                    # Reciprocal edge probability
+    transitivity =1,                 # Friend of a friend is my friend probability
     community_file='my_communities.json',                  
     base_path="my_network",           # Path for the FileBasedGraph's data
     bridge_probability=0,
