@@ -234,7 +234,7 @@ fn run_edge_creation(
             continue;
         }
 
-        let max_attempts = target_link_count * 10;
+        let max_attempts = target_link_count * 3;
         let mut attempts: i64 = 0;
 
         // Batch community selection
