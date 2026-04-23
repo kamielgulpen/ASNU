@@ -155,7 +155,7 @@ def plot_per_network(dec, outdir):
     networks = sorted(dec["network"].unique())
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     print(dec)
-    dec = dec[dec["threshold_value"] > 0.05]
+    dec = dec[dec["threshold_value"] > 0.01]
     # 1) P(ignite) vs threshold, coloured by network
     ax = axes[0, 0]
     for net in networks:
@@ -253,8 +253,8 @@ def plot_run_histograms(df, outdir, max_cells=24, pool=True):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="CSV with final_values column")
-    ap.add_argument("--outdir", default="./decomposition_out")
-    ap.add_argument("--rel", type=float, default=0.01,
+    ap.add_argument("--outdir", default="./analysis/decomposition_out")
+    ap.add_argument("--rel", type=float, default=0.001,
                     help="Ignition cutoff as fraction of network size")
     ap.add_argument("--no-pool", action="store_true",
                     help="Keep replicates separate instead of pooling by (network, threshold)")

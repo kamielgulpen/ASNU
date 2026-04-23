@@ -9,11 +9,13 @@ import time
 from scipy import stats
 
 # Generate network
+links = 'data/tab_werkschool.csv'
 # links = 'data/enriched/aggregated/interactions_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv'
-links = 'data/enriched/aggregated/interactions_geslacht.csv'
+# links = 'data/enriched/aggregated/interactions_geslacht.csv'
 # as example we use group interaction data on a work / school layer
 # pops = 'data/enriched/aggregated/pop_etngrp_geslacht_lft_oplniv_inkomensniveau_arbeidsstatus_uitkeringstype_burgerlijke_staat.csv' 
-pops  = 'data/enriched/aggregated/pop_geslacht.csv'
+# pops  = 'data/enriched/aggregated/pop_geslacht.csv'
+pops = 'data/tab_n_(with oplniv).csv'
 scale = 1
 start = time.perf_counter()
 
@@ -22,27 +24,24 @@ create_communities(
     pops, 
     links,
     scale=scale, 
-    number_of_communities = 3000,
+    number_of_communities = int((20000)),
     output_path='my_communities.json',
-    mode= "capacity",
+    mode= "capacity_fast",
     allow_new_communities=False,
-    new_comm_penalty=400
-
-
 )
 
 graph = generate(
     pops,                             # The group-level population data
     links,                            # The group-level interaction data
-    preferential_attachment=0.0,     # Preferential attachment strength
+    preferential_attachment=0,     # Preferential attachment strength
     scale=scale,                        # Population scaling
-    reciprocity=1,                    # Reciprocal edge probability
-    transitivity =0,                  # Friend of a friend is my friend probability
+    reciprocity = 1,                    # Reciprocal edge probability
+    transitivity = 1,                  # Friend of a friend is my friend probability
     community_file='my_communities.json',                  
     base_path="my_network",           # Path for the FileBasedGraph's data
     bridge_probability=0,
     fully_connect_communities = False,
-    fill_unfulfilled = False
+    fill_unfulfilled = True
 )
 
 end = time.perf_counter()
