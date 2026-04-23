@@ -1453,11 +1453,8 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
             v2 = G.group_to_attrs.get(gid, {}).get(char2)
             group_comms[gid] = mix_comms + block_comms.get((v1, v2), [])
 
-    # Assign nodes capacity-aware: allocate proportional to remaining headroom
-    # so all K communities converge to N/K nodes regardless of mixing floor overlap.
+    # Assign nodes evenly across each group's community set
     G.number_of_communities = K
-    target = max(1, N // K)
-    community_count = np.zeros(K, dtype=np.int64)
 
     for gid in sorted_groups:
         nodes = np.array(group_nodes_map[gid], dtype=np.int64)
@@ -1465,16 +1462,12 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
             continue
         rng.shuffle(nodes)
         chosen = group_comms.get(gid, mix_comms) or mix_comms
-
-        # Weight each community by remaining capacity (headroom above current fill)
-        headroom = np.array([max(0, target - community_count[c]) for c in chosen], dtype=np.float64)
-        if headroom.sum() == 0:
-            headroom = np.ones(len(chosen), dtype=np.float64)
-        alloc = _proportional_alloc(headroom.tolist(), len(nodes))
-
+        k_actual = len(chosen)
+        base = len(nodes) // k_actual
+        rem = len(nodes) % k_actual
         idx = 0
-        for comm, count in zip(chosen, alloc):
-            community_count[comm] += count
+        for i, comm in enumerate(chosen):
+            count = base + (1 if i < rem else 0)
             for node in nodes[idx:idx + count]:
                 node_int = int(node)
                 G.communities_to_nodes.setdefault((comm, gid), []).append(node_int)
