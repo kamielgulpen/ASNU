@@ -699,9 +699,9 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
             sa_total_nodes,
             effective_penalty,
             rust_initial_comp if initial_comp else None,
-            sa_fraction,
-            overcap_penalty,
-            max_eval,
+            # sa_fraction,
+            # overcap_penalty,
+            # max_eval,
         )
 
         # Populate G structures from assignments
@@ -1320,15 +1320,16 @@ def populate_communities_adaptive(G, num_communities, seed=42):
     G.node_coordinates = node_coordinates
     print(f"\nAdaptive assignment complete: {total_nodes} nodes -> {pool_size} communities")
 
-
 def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isolation_threshold=0.05, seed=42):
     """
-    Segregation-driven hierarchical community assignment.
+    Segregation-driven hierarchical community assignment with adaptive mixing.
 
     Measures isolation per characteristic from the edge budget, then partitions
     communities hierarchically: the most segregated characteristic anchors the
-    primary split, the second most segregated subdivides within that, and a
-    mixing floor of shared communities allows cross-group edges to be fulfilled.
+    primary split, the second most segregated subdivides within that. The
+    mixing floor is adaptive: `mixing_floor` sets the minimum fraction of
+    communities reserved for cross-block edges, but K_mix grows if the
+    cross-block edge budget exceeds that minimum.
     """
     rng = np.random.default_rng(seed)
     sorted_groups = sorted(int(g) for g in G.group_ids)
@@ -1374,9 +1375,6 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
     print(f"  Meaningful characteristics (>={isolation_threshold}): {[(c, f'{iso:.3f}') for c, iso in meaningful]}")
 
     K = num_communities
-    K_mix = max(1, round(K * mixing_floor))
-    K_core = K - K_mix
-    mix_comms = list(range(K_mix))
 
     def _proportional_alloc(weights, total):
         """Allocate `total` integers proportional to weights (Bresenham style, min 1 each)."""
@@ -1398,6 +1396,52 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
             sizes[i] += 1
             remainder -= 1
         return sizes
+
+    # --- Determine group -> block assignment first (needed for adaptive K_mix) ---
+    # group_to_block maps each group to its block key (same keys used for block_comms later)
+    group_to_block = {}
+    if not meaningful:
+        for gid in sorted_groups:
+            group_to_block[gid] = ()
+    elif len(meaningful) == 1:
+        char1, _ = meaningful[0]
+        for gid in sorted_groups:
+            v1 = G.group_to_attrs.get(gid, {}).get(char1)
+            group_to_block[gid] = (v1,)
+    else:
+        char1, _ = meaningful[0]
+        char2, _ = meaningful[1]
+        for gid in sorted_groups:
+            v1 = G.group_to_attrs.get(gid, {}).get(char1)
+            v2 = G.group_to_attrs.get(gid, {}).get(char2)
+            group_to_block[gid] = (v1, v2)
+
+    # --- Adaptive K_mix based on cross-block edge budget ---
+    within_block_budget = 0
+    cross_block_budget = 0
+    for (g, h), budget in G.maximum_num_links.items():
+        if g not in group_to_block or h not in group_to_block:
+            continue
+        if group_to_block[g] == group_to_block[h]:
+            within_block_budget += budget
+        else:
+            cross_block_budget += budget
+    total_budget = within_block_budget + cross_block_budget
+
+    K_mix_min = max(1, round(K * mixing_floor))
+    if total_budget > 0:
+        K_mix_adaptive = max(1, round(K * cross_block_budget / total_budget))
+    else:
+        K_mix_adaptive = K_mix_min
+    K_mix = max(K_mix_min, K_mix_adaptive)
+    # Guard: leave at least one community per block
+    num_blocks = len(set(group_to_block.values()))
+    K_mix = min(K_mix, K - max(1, num_blocks))
+    K_core = K - K_mix
+    mix_comms = list(range(K_mix))
+
+    print(f"  Edge budget: within-block={within_block_budget}, cross-block={cross_block_budget}")
+    print(f"  K_mix={K_mix} (floor={K_mix_min}, adaptive={K_mix_adaptive}), K_core={K_core}, blocks={num_blocks}")
 
     # Build group -> community list mapping
     if not meaningful:
@@ -1453,8 +1497,11 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
             v2 = G.group_to_attrs.get(gid, {}).get(char2)
             group_comms[gid] = mix_comms + block_comms.get((v1, v2), [])
 
-    # Assign nodes evenly across each group's community set
+    # Assign nodes capacity-aware: allocate proportional to remaining headroom
+    # so all K communities converge to N/K nodes regardless of mixing floor overlap.
     G.number_of_communities = K
+    target = max(1, N // K)
+    community_count = np.zeros(K, dtype=np.int64)
 
     for gid in sorted_groups:
         nodes = np.array(group_nodes_map[gid], dtype=np.int64)
@@ -1462,12 +1509,16 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
             continue
         rng.shuffle(nodes)
         chosen = group_comms.get(gid, mix_comms) or mix_comms
-        k_actual = len(chosen)
-        base = len(nodes) // k_actual
-        rem = len(nodes) % k_actual
+
+        # Weight each community by remaining capacity (headroom above current fill)
+        headroom = np.array([max(0, target - community_count[c]) for c in chosen], dtype=np.float64)
+        if headroom.sum() == 0:
+            headroom = np.ones(len(chosen), dtype=np.float64)
+        alloc = _proportional_alloc(headroom.tolist(), len(nodes))
+
         idx = 0
-        for i, comm in enumerate(chosen):
-            count = base + (1 if i < rem else 0)
+        for comm, count in zip(chosen, alloc):
+            community_count[comm] += count
             for node in nodes[idx:idx + count]:
                 node_int = int(node)
                 G.communities_to_nodes.setdefault((comm, gid), []).append(node_int)
@@ -1476,7 +1527,6 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
             idx += count
 
     print(f"\nSegregation-based assignment complete: {N} nodes -> {K} communities")
-
 
 def create_communities(pops_path, links_path, scale, number_of_communities=None,
                        output_path='communities.json', community_size_distribution='natural',
@@ -1578,6 +1628,7 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
         if verbose:
             print(f"\nAssigning nodes via segregation-driven hierarchical assignment "
                   f"(target={number_of_communities} communities)...")
+
         populate_communities_segregation(G, number_of_communities,
                                          mixing_floor=mixing_floor,
                                          isolation_threshold=isolation_threshold)

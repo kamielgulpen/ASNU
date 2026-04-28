@@ -39,8 +39,7 @@ for r in range(1, len(characteristics) + 1):
         # 2. Entropy of the normalized distribution
         # This measures how 'spread out' the connection probability is across the matrix
         p = df_merged['norm_weight'] / df_merged['norm_weight'].sum()
-        print(p)
-        p = df_merged['norm_weight'] / df_merged['norm_weight'].sum()
+
         H_obs = entropy(p, base=2)
         H_norm = H_obs / H_max if H_max > 0 else 0
 

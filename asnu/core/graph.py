@@ -129,10 +129,10 @@ class NetworkXGraph:
         node_attrs = data['node_attrs'].item()  # .item() unpacks the object array
         nx.set_node_attributes(G, node_attrs)
         
-        # Restore metadata if present
-        if 'metadata' in data:
-            metadata = pickle.loads(data['metadata'].tobytes())
-            G.graph.update(metadata)
+        # # Restore metadata if present
+        # if 'metadata' in data:
+        #     metadata = pickle.loads(data['metadata'].tobytes())
+        #     G.graph.update(metadata)
         
         return G
 

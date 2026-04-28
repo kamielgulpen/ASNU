@@ -36,7 +36,7 @@ def nx_to_igraph(nx_graph):
 
 
 # Generation parameters
-scale = 0.001
+scale = 1
 
 number_of_communities = 1
 preferential_attachment = 0

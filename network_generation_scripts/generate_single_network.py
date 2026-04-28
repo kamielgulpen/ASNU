@@ -28,11 +28,11 @@ start = time.perf_counter()
 create_communities(
     pops, links,
     scale=scale,
-    number_of_communities=20000,
+    number_of_communities=1000,
     output_path='my_communities.json',
     mode='segregation',
-    mixing_floor= 0.15,
-    isolation_threshold = 0.05
+    mixing_floor= 0.5,
+    isolation_threshold = 0.1
 
     # allow_new_communities=False
 )
