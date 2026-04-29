@@ -154,7 +154,7 @@ fn process_nodes<'py>(
 /// Processes all group pairs in one Rust call, maintaining the edge set
 /// and adjacency list internally. Returns all new edges and final link counts.
 #[pyfunction]
-#[pyo3(signature = (group_pairs, valid_communities_map, maximum_num_links, communities_to_nodes, nodes_to_group, fraction, reciprocity_p, transitivity_p, pa_scope, number_of_communities, bridge_probability=0.0, pre_existing_edges=None))]
+#[pyo3(signature = (group_pairs, valid_communities_map, maximum_num_links, communities_to_nodes, nodes_to_group, fraction, reciprocity_p, transitivity_p, pa_scope, number_of_communities, bridge_probability=0.0, pre_existing_edges=None, node_coordinates=None))]
 fn run_edge_creation(
     // List of (src_id, dst_id, target_link_count) for each group pair
     group_pairs: Vec<(i64, i64, i64)>,
@@ -175,6 +175,8 @@ fn run_edge_creation(
     bridge_probability: f64,
     // Optional pre-existing edges (for multiplex pre-seeding)
     pre_existing_edges: Option<Vec<(i64, i64)>>,
+    // Optional node coordinates for Phase B spatial ring search
+    node_coordinates: Option<HashMap<i64, f64>>,
 ) -> PyResult<(Vec<(i64, i64)>, Vec<(i64, i64, i64)>)> {
     let mut rng = thread_rng();
 
@@ -212,6 +214,37 @@ fn run_edge_creation(
     // Src node list cache per (community_id, group_id)
     let mut src_node_cache: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
 
+    // Phase B: src nodes sorted by coordinate, dst communities sorted by centroid.
+    // Ring search finds nearest communities then picks a random node from each —
+    // spreading degree load across all nodes rather than targeting edge-nearest ones.
+    let mut group_sorted: HashMap<i64, Vec<(f64, i64)>> = HashMap::new();
+    let mut group_comm_sorted: HashMap<i64, Vec<(f64, i64)>> = HashMap::new();
+    if let Some(ref nc) = node_coordinates {
+        let mut group_all_nodes: HashMap<i64, Vec<i64>> = HashMap::new();
+        for (&(_, gid), nodes) in &communities_to_nodes {
+            group_all_nodes.entry(gid).or_default().extend(nodes.iter().copied());
+        }
+        for (gid, nodes) in &group_all_nodes {
+            let mut sorted: Vec<(f64, i64)> = nodes.iter()
+                .map(|&n| (*nc.get(&n).unwrap_or(&0.5), n))
+                .collect();
+            sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            group_sorted.insert(*gid, sorted);
+        }
+        // Community centroids: average coordinate of nodes in (comm, group)
+        for (&(comm_id, gid), nodes) in &communities_to_nodes {
+            if nodes.is_empty() { continue; }
+            let centroid: f64 = nodes.iter()
+                .map(|&n| *nc.get(&n).unwrap_or(&0.5))
+                .sum::<f64>() / nodes.len() as f64;
+            group_comm_sorted.entry(gid).or_default().push((centroid, comm_id));
+        }
+        for sorted in group_comm_sorted.values_mut() {
+            sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        println!("  Phase B: built sorted arrays for {} groups", group_sorted.len());
+    }
+
     let total_pairs = group_pairs.len();
 
     for (pair_idx, (src_id, dst_id, target_link_count)) in group_pairs.iter().enumerate() {
@@ -223,10 +256,9 @@ fn run_edge_creation(
             println!("Processing pair {} of {}", pair_idx + 1, total_pairs);
         }
 
-        let possible_communities = match valid_communities_map.get(&(src_id, dst_id)) {
-            Some(v) if !v.is_empty() => v,
-            _ => continue,
-        };
+        let possible_communities = valid_communities_map
+            .get(&(src_id, dst_id))
+            .filter(|v| !v.is_empty());
 
         let mut num_links = *existing_num_links.get(&(src_id, dst_id)).unwrap_or(&0);
 
@@ -234,180 +266,182 @@ fn run_edge_creation(
             continue;
         }
 
-        let max_attempts = target_link_count * 3;
-        let mut attempts: i64 = 0;
-
-        // Batch community selection
-        let batch_size: usize = 10000;
-        let pc_len = possible_communities.len();
-        let mut community_batch: Vec<i64> = (0..batch_size)
-            .map(|_| possible_communities[rng.gen_range(0..pc_len)])
-            .collect();
-        let mut batch_idx: usize = 0;
-
-        while num_links < target_link_count && attempts < max_attempts {
-            let community_id = community_batch[batch_idx];
-            batch_idx += 1;
-
-            if batch_idx >= batch_size {
-                community_batch = (0..batch_size)
-                    .map(|_| possible_communities[rng.gen_range(0..pc_len)])
-                    .collect();
-                batch_idx = 0;
-            }
-
-            // Get src nodes for this community
-            let src_cache_key = (community_id, src_id);
-            if !src_node_cache.contains_key(&src_cache_key) {
-                let nodes = communities_to_nodes
-                    .get(&src_cache_key)
-                    .cloned()
-                    .unwrap_or_default();
-                src_node_cache.insert(src_cache_key, nodes);
-            }
-            let src_nodes = src_node_cache.get(&src_cache_key).unwrap();
-            if src_nodes.is_empty() {
-                attempts += 1;
-                continue;
-            }
-
-            // Decide: bridge edge (dst from neighboring community) or normal
-            let dst_community = if bridge_probability > 0.0
-                && number_of_communities > 1
-                && rng.gen::<f64>() < bridge_probability
-            {
-                let direction: i64 = if rng.gen::<bool>() { 1 } else { -1 };
-                ((community_id + direction).rem_euclid(number_of_communities)) as i64
-            } else {
-                community_id
+        // ── Phase A: community-based edge creation ────────────────────────────
+        // Communities are iterated sequentially (shuffled once per pair) so each
+        // community exhausts a proportional quota before moving to the next.
+        // This concentrates edges within communities, raising transitivity.
+        if let Some(communities) = possible_communities {
+            let mut comm_order: Vec<i64> = {
+                let mut seen = std::collections::HashSet::new();
+                communities.iter().filter(|&&c| seen.insert(c)).cloned().collect()
             };
+            comm_order.shuffle(&mut rng);
+            let n_comms = comm_order.len();
 
-            // Initialize popularity pool for (dst_community, dst_group)
-            let pool_key = (dst_community, dst_id);
-            if !popularity_pool.contains_key(&pool_key) {
-                let dst_nodes = communities_to_nodes
-                    .get(&pool_key)
-                    .cloned()
-                    .unwrap_or_default();
-                if !dst_nodes.is_empty() {
-                    let sample_size = ((dst_nodes.len() as f64) * fraction).ceil() as usize;
-                    let sample_size = sample_size.min(dst_nodes.len());
-                    let mut sampled = dst_nodes;
-                    sampled.shuffle(&mut rng);
-                    sampled.truncate(sample_size);
-                    popularity_pool.insert(pool_key, sampled);
-                } else {
-                    popularity_pool.insert(pool_key, vec![]);
-                }
-            }
+            let max_passes: i64 = 3;
+            let mut pass: i64 = 0;
 
-            let pool = popularity_pool.get(&pool_key).unwrap();
-            if pool.is_empty() {
-                attempts += 1;
-                continue;
-            }
+            'outer: while num_links < target_link_count && pass < max_passes {
+                pass += 1;
+                for &community_id in &comm_order {
+                    if num_links >= target_link_count { break 'outer; }
 
-            // Pick random src and dst
-            let s = src_nodes[rng.gen_range(0..src_nodes.len())];
-            let d = pool[rng.gen_range(0..pool.len())];
+                    let remaining = (target_link_count - num_links) as usize;
+                    let quota = ((remaining + n_comms - 1) / n_comms).max(1);
 
-            if s != d && !edges.contains(&(s, d)) {
-                edges.insert((s, d));
-                adjacency.entry(s).or_default().push(d);
-                new_edges.push((s, d));
-                num_links += 1;
-                existing_num_links.insert((src_id, dst_id), num_links);
+                    // Get src nodes for this community
+                    let src_cache_key = (community_id, src_id);
+                    if !src_node_cache.contains_key(&src_cache_key) {
+                        let nodes = communities_to_nodes
+                            .get(&src_cache_key)
+                            .cloned()
+                            .unwrap_or_default();
+                        src_node_cache.insert(src_cache_key, nodes);
+                    }
+                    if src_node_cache.get(&src_cache_key).unwrap().is_empty() {
+                        continue;
+                    }
 
-                // Reciprocity
-                if rng.gen::<f64>() < reciprocity_p {
-                    let rev_existing = *existing_num_links.get(&(dst_id, src_id)).unwrap_or(&0);
-                    let rev_max = *maximum_num_links.get(&(dst_id, src_id)).unwrap_or(&0);
-                    if rev_existing < rev_max && !edges.contains(&(d, s)) {
-                        edges.insert((d, s));
-                        adjacency.entry(d).or_default().push(s);
-                        new_edges.push((d, s));
-                        *existing_num_links.entry((dst_id, src_id)).or_insert(0) += 1;
-                        if dst_id == src_id {
+                    // Bridge or normal dst community
+                    let dst_community = if bridge_probability > 0.0
+                        && number_of_communities > 1
+                        && rng.gen::<f64>() < bridge_probability
+                    {
+                        let direction: i64 = if rng.gen::<bool>() { 1 } else { -1 };
+                        ((community_id + direction).rem_euclid(number_of_communities)) as i64
+                    } else {
+                        community_id
+                    };
+
+                    // Initialize popularity pool for (dst_community, dst_group)
+                    let pool_key = (dst_community, dst_id);
+                    if !popularity_pool.contains_key(&pool_key) {
+                        let dst_nodes = communities_to_nodes
+                            .get(&pool_key)
+                            .cloned()
+                            .unwrap_or_default();
+                        if !dst_nodes.is_empty() {
+                            let sample_size = ((dst_nodes.len() as f64) * fraction).ceil() as usize;
+                            let sample_size = sample_size.min(dst_nodes.len());
+                            let mut sampled = dst_nodes;
+                            sampled.shuffle(&mut rng);
+                            sampled.truncate(sample_size);
+                            popularity_pool.insert(pool_key, sampled);
+                        } else {
+                            popularity_pool.insert(pool_key, vec![]);
+                        }
+                    }
+                    if popularity_pool.get(&pool_key).unwrap().is_empty() {
+                        continue;
+                    }
+
+                    // Create up to quota edges within this community
+                    let mut created = 0usize;
+                    let mut local_attempts = 0usize;
+                    let max_local = quota * 3;
+
+                    while created < quota && local_attempts < max_local && num_links < target_link_count {
+                        local_attempts += 1;
+
+                        let s = {
+                            let src_nodes = src_node_cache.get(&src_cache_key).unwrap();
+                            src_nodes[rng.gen_range(0..src_nodes.len())]
+                        };
+                        let d = {
+                            let pool = popularity_pool.get(&pool_key).unwrap();
+                            pool[rng.gen_range(0..pool.len())]
+                        };
+
+                        if s != d && !edges.contains(&(s, d)) {
+                            edges.insert((s, d));
+                            adjacency.entry(s).or_default().push(d);
+                            new_edges.push((s, d));
                             num_links += 1;
                             existing_num_links.insert((src_id, dst_id), num_links);
-                        }
-                    }
-                }
+                            created += 1;
 
-                // Preferential attachment
-                if rng.gen::<f64>() > fraction && fraction != 1.0 {
-                    if pa_scope == "global" {
-                        for comm_id in 0..number_of_communities {
-                            if rng.gen::<f64>() < (1.0 / number_of_communities as f64) * fraction {
-                                let global_key = (comm_id, dst_id);
-                                if let Some(p) = popularity_pool.get_mut(&global_key) {
-                                    p.push(d);
-                                }
-                            }
-                        }
-                    } else {
-                        if rng.gen::<f64>() > fraction {
-                            if let Some(p) = popularity_pool.get_mut(&pool_key) {
-                                p.push(d);
-                                // Also add a random node from the full dst community
-                                if let Some(dst_community_nodes) = communities_to_nodes.get(&pool_key) {
-                                    if !dst_community_nodes.is_empty() {
-                                        let dst_random_community_node = dst_community_nodes[rng.gen_range(0..dst_community_nodes.len())];
-                                        p.push(dst_random_community_node);
+                            // Reciprocity
+                            if rng.gen::<f64>() < reciprocity_p {
+                                let rev_existing = *existing_num_links.get(&(dst_id, src_id)).unwrap_or(&0);
+                                let rev_max = *maximum_num_links.get(&(dst_id, src_id)).unwrap_or(&0);
+                                if rev_existing < rev_max && !edges.contains(&(d, s)) {
+                                    edges.insert((d, s));
+                                    adjacency.entry(d).or_default().push(s);
+                                    new_edges.push((d, s));
+                                    *existing_num_links.entry((dst_id, src_id)).or_insert(0) += 1;
+                                    if dst_id == src_id {
+                                        num_links += 1;
+                                        existing_num_links.insert((src_id, dst_id), num_links);
                                     }
                                 }
                             }
-                        }
-                    }
-                }
 
-                // Transitivity
-                if transitivity_p >= rng.gen::<f64>() {
-                    let neighbors: Vec<i64> = adjacency
-                        .get(&d)
-                        .cloned()
-                        .unwrap_or_default();
-                    for n in neighbors {
-                        if s == n {
-                            continue;
-                        }
-                        let n_id = match nodes_to_group.get(&n) {
-                            Some(&id) => id,
-                            None => continue,
-                        };
-                        let pair = (src_id, n_id);
-                        let max_l = match maximum_num_links.get(&pair) {
-                            Some(&v) => v,
-                            None => continue,
-                        };
-                        let existing = *existing_num_links.get(&pair).unwrap_or(&0);
-                        if existing < max_l && !edges.contains(&(s, n)) {
-                            edges.insert((s, n));
-                            adjacency.entry(s).or_default().push(n);
-                            new_edges.push((s, n));
-                            *existing_num_links.entry(pair).or_insert(0) += 1;
-
-                            if n_id == dst_id {
-                                num_links += 1;
-                                existing_num_links.insert((src_id, dst_id), num_links);
+                            // Preferential attachment
+                            if rng.gen::<f64>() > fraction && fraction != 1.0 {
+                                if pa_scope == "global" {
+                                    for comm_id in 0..number_of_communities {
+                                        if rng.gen::<f64>() < (1.0 / number_of_communities as f64) * fraction {
+                                            let global_key = (comm_id, dst_id);
+                                            if let Some(p) = popularity_pool.get_mut(&global_key) {
+                                                p.push(d);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    if rng.gen::<f64>() > fraction {
+                                        if let Some(p) = popularity_pool.get_mut(&pool_key) {
+                                            p.push(d);
+                                            if let Some(dst_community_nodes) = communities_to_nodes.get(&pool_key) {
+                                                if !dst_community_nodes.is_empty() {
+                                                    let r = rng.gen_range(0..dst_community_nodes.len());
+                                                    p.push(dst_community_nodes[r]);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
-                            // Reciprocity for transitive edge
-                            if rng.gen::<f64>() < reciprocity_p {
-                                let rev_pair = (n_id, src_id);
-                                let rev_existing =
-                                    *existing_num_links.get(&rev_pair).unwrap_or(&0);
-                                let rev_max =
-                                    *maximum_num_links.get(&rev_pair).unwrap_or(&0);
-                                if !edges.contains(&(n, s)) && rev_existing < rev_max {
-                                    edges.insert((n, s));
-                                    adjacency.entry(n).or_default().push(s);
-                                    new_edges.push((n, s));
-                                    *existing_num_links.entry(rev_pair).or_insert(0) += 1;
-                                    if n_id == src_id && src_id == dst_id {
-                                        num_links += 1;
-                                        existing_num_links
-                                            .insert((src_id, dst_id), num_links);
+                            // Transitivity
+                            if transitivity_p >= rng.gen::<f64>() {
+                                let neighbors: Vec<i64> = adjacency.get(&d).cloned().unwrap_or_default();
+                                for n in neighbors {
+                                    if s == n { continue; }
+                                    let n_id = match nodes_to_group.get(&n) {
+                                        Some(&id) => id,
+                                        None => continue,
+                                    };
+                                    let pair = (src_id, n_id);
+                                    let max_l = match maximum_num_links.get(&pair) {
+                                        Some(&v) => v,
+                                        None => continue,
+                                    };
+                                    let existing = *existing_num_links.get(&pair).unwrap_or(&0);
+                                    if existing < max_l && !edges.contains(&(s, n)) {
+                                        edges.insert((s, n));
+                                        adjacency.entry(s).or_default().push(n);
+                                        new_edges.push((s, n));
+                                        *existing_num_links.entry(pair).or_insert(0) += 1;
+                                        if n_id == dst_id {
+                                            num_links += 1;
+                                            existing_num_links.insert((src_id, dst_id), num_links);
+                                        }
+                                        // Reciprocity for transitive edge
+                                        if rng.gen::<f64>() < reciprocity_p {
+                                            let rev_pair = (n_id, src_id);
+                                            let rev_existing = *existing_num_links.get(&rev_pair).unwrap_or(&0);
+                                            let rev_max = *maximum_num_links.get(&rev_pair).unwrap_or(&0);
+                                            if !edges.contains(&(n, s)) && rev_existing < rev_max {
+                                                edges.insert((n, s));
+                                                adjacency.entry(n).or_default().push(s);
+                                                new_edges.push((n, s));
+                                                *existing_num_links.entry(rev_pair).or_insert(0) += 1;
+                                                if n_id == src_id && src_id == dst_id {
+                                                    num_links += 1;
+                                                    existing_num_links.insert((src_id, dst_id), num_links);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -415,10 +449,88 @@ fn run_edge_creation(
                     }
                 }
             }
+        } // end Phase A
+    } // end pair loop
 
-            attempts += 1;
+    // ── Phase B: spatial ring search for remaining budget ────────────────────
+    // For each pair still under budget, finds nearest dst communities by
+    // centroid and picks a random node — fills cross-block pairs left by A/B.
+    for (pair_idx, &(src_id, dst_id, target_link_count)) in group_pairs.iter().enumerate() {
+        if (pair_idx + 1) % 5000 == 0 {
+            println!("Phase B: pair {} of {}", pair_idx + 1, total_pairs);
         }
-    }
+        let mut num_links = *existing_num_links.get(&(src_id, dst_id)).unwrap_or(&0);
+        if num_links >= target_link_count { continue; }
+
+        if let (Some(src_sorted), Some(dst_comm_sorted)) =
+            (group_sorted.get(&src_id), group_comm_sorted.get(&dst_id))
+        {
+            const PHASE_C_COMM_WINDOW: usize = 200;
+            let n_dst_comm = dst_comm_sorted.len();
+            let win = PHASE_C_COMM_WINDOW.min(n_dst_comm);
+            let n_src = src_sorted.len();
+
+            if n_src > 0 && win > 0 {
+                let mut src_indices: Vec<usize> = (0..n_src).collect();
+                loop {
+                    if num_links >= target_link_count { break; }
+                    src_indices.shuffle(&mut rng);
+                    let remaining = (target_link_count - num_links) as usize;
+                    let edges_per_src = ((remaining + n_src - 1) / n_src).max(1).min(win);
+                    let mut made_progress = false;
+
+                    for &si in &src_indices {
+                        if num_links >= target_link_count { break; }
+                        let (theta_s, s) = src_sorted[si];
+                        let center = dst_comm_sorted.partition_point(|&(c, _)| c < theta_s);
+                        let mut found = 0usize;
+
+                        'delta: for delta in 0..win {
+                            if found >= edges_per_src { break 'delta; }
+                            let j1 = (center + delta) % n_dst_comm;
+                            let j2 = (center + n_dst_comm - delta - 1) % n_dst_comm;
+                            for &j in &[j1, j2] {
+                                if found >= edges_per_src || num_links >= target_link_count { break; }
+                                let (_, comm_id) = dst_comm_sorted[j];
+                                let pool_key = (comm_id, dst_id);
+                                if let Some(dst_nodes) = communities_to_nodes.get(&pool_key) {
+                                    if !dst_nodes.is_empty() {
+                                        let d = dst_nodes[rng.gen_range(0..dst_nodes.len())];
+                                        if s != d && !edges.contains(&(s, d)) {
+                                            edges.insert((s, d));
+                                            adjacency.entry(s).or_default().push(d);
+                                            new_edges.push((s, d));
+                                            *existing_num_links.entry((src_id, dst_id)).or_insert(0) += 1;
+                                            num_links += 1;
+                                            found += 1;
+                                            made_progress = true;
+
+                                            // Reciprocity (same logic as Phase A)
+                                            if rng.gen::<f64>() < reciprocity_p {
+                                                let rev_existing = *existing_num_links.get(&(dst_id, src_id)).unwrap_or(&0);
+                                                let rev_max = *maximum_num_links.get(&(dst_id, src_id)).unwrap_or(&0);
+                                                if rev_existing < rev_max && !edges.contains(&(d, s)) {
+                                                    edges.insert((d, s));
+                                                    adjacency.entry(d).or_default().push(s);
+                                                    new_edges.push((d, s));
+                                                    *existing_num_links.entry((dst_id, src_id)).or_insert(0) += 1;
+                                                    if dst_id == src_id {
+                                                        num_links += 1;
+                                                        existing_num_links.insert((src_id, dst_id), num_links);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !made_progress { break; }
+                }
+            }
+        }
+    } // end Phase B
 
     // Convert existing_num_links to flat triples
     let links_out: Vec<(i64, i64, i64)> = existing_num_links
