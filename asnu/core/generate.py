@@ -363,12 +363,14 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
     if pre_seed_edges:
         rust_pre_edges = [(int(u), int(v)) for u, v in pre_seed_edges]
 
+    node_coords = getattr(G, 'node_coordinates', None)
     new_edges, link_counts = rust_edge_creation(
         group_pairs, vcm, mnl, ctn, ntg,
         fraction, reciprocity_p, transitivity_p,
         pa_scope, G.number_of_communities,
         bridge_probability,
         rust_pre_edges,
+        node_coords,
     )
 
     # Apply edges to the NetworkX graph

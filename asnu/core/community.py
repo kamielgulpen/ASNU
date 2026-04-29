@@ -727,6 +727,17 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
     print(f"\nCapacity-based community assignment complete: "
           f"{total_nodes} nodes -> {G.number_of_communities} communities")
 
+    # Assign random uniform coordinates so Phase B spatial ring search activates.
+    K = G.number_of_communities
+    _rng = np.random.default_rng(42)
+    comm_coords = _rng.uniform(0.0, 1.0, size=K)
+    jitter_std = 1e-4
+    node_coordinates = {}
+    for node_int, comm in G.nodes_to_communities.items():
+        theta_c = float(comm_coords[int(comm)])
+        node_coordinates[int(node_int)] = (theta_c + float(_rng.normal(0, jitter_std))) % 1.0
+    G.node_coordinates = node_coordinates
+
 
 def connect_all_within_communities(G, verbose=True):
     """
@@ -1322,14 +1333,13 @@ def populate_communities_adaptive(G, num_communities, seed=42):
 
 def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isolation_threshold=0.05, seed=42):
     """
-    Segregation-driven hierarchical community assignment with adaptive mixing.
+    Segregation-driven hierarchical community assignment.
 
     Measures isolation per characteristic from the edge budget, then partitions
     communities hierarchically: the most segregated characteristic anchors the
-    primary split, the second most segregated subdivides within that. The
-    mixing floor is adaptive: `mixing_floor` sets the minimum fraction of
-    communities reserved for cross-block edges, but K_mix grows if the
-    cross-block edge budget exceeds that minimum.
+    primary split, the second most segregated subdivides within that. Each group
+    maps exclusively to its block-specific communities — no shared mixing pool.
+    Cross-block edges are handled by fill_unfulfilled / Phase B in edge creation.
     """
     rng = np.random.default_rng(seed)
     sorted_groups = sorted(int(g) for g in G.group_ids)
@@ -1397,53 +1407,13 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
             remainder -= 1
         return sizes
 
-    # --- Determine group -> block assignment first (needed for adaptive K_mix) ---
-    # group_to_block maps each group to its block key (same keys used for block_comms later)
-    group_to_block = {}
-    if not meaningful:
-        for gid in sorted_groups:
-            group_to_block[gid] = ()
-    elif len(meaningful) == 1:
-        char1, _ = meaningful[0]
-        for gid in sorted_groups:
-            v1 = G.group_to_attrs.get(gid, {}).get(char1)
-            group_to_block[gid] = (v1,)
-    else:
-        char1, _ = meaningful[0]
-        char2, _ = meaningful[1]
-        for gid in sorted_groups:
-            v1 = G.group_to_attrs.get(gid, {}).get(char1)
-            v2 = G.group_to_attrs.get(gid, {}).get(char2)
-            group_to_block[gid] = (v1, v2)
+    num_blocks = len(meaningful) and len(set(
+        tuple(G.group_to_attrs.get(gid, {}).get(c) for c, _ in meaningful[:2])
+        for gid in sorted_groups
+    ))
+    print(f"  Blocks: {num_blocks}, communities: {K}")
 
-    # --- Adaptive K_mix based on cross-block edge budget ---
-    within_block_budget = 0
-    cross_block_budget = 0
-    for (g, h), budget in G.maximum_num_links.items():
-        if g not in group_to_block or h not in group_to_block:
-            continue
-        if group_to_block[g] == group_to_block[h]:
-            within_block_budget += budget
-        else:
-            cross_block_budget += budget
-    total_budget = within_block_budget + cross_block_budget
-
-    K_mix_min = max(1, round(K * mixing_floor))
-    if total_budget > 0:
-        K_mix_adaptive = max(1, round(K * cross_block_budget / total_budget))
-    else:
-        K_mix_adaptive = K_mix_min
-    K_mix = max(K_mix_min, K_mix_adaptive)
-    # Guard: leave at least one community per block
-    num_blocks = len(set(group_to_block.values()))
-    K_mix = min(K_mix, K - max(1, num_blocks))
-    K_core = K - K_mix
-    mix_comms = list(range(K_mix))
-
-    print(f"  Edge budget: within-block={within_block_budget}, cross-block={cross_block_budget}")
-    print(f"  K_mix={K_mix} (floor={K_mix_min}, adaptive={K_mix_adaptive}), K_core={K_core}, blocks={num_blocks}")
-
-    # Build group -> community list mapping
+    # Build group -> community list mapping (each group maps only to its block)
     if not meaningful:
         group_comms = {gid: list(range(K)) for gid in sorted_groups}
 
@@ -1455,12 +1425,11 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
             val_to_groups.setdefault(v, []).append(gid)
         vals1 = sorted(val_to_groups.keys(), key=str)
 
-        # Block size proportional to population of each value
         pops = [sum(len(group_nodes_map[g]) for g in val_to_groups[v]) for v in vals1]
-        sizes = _proportional_alloc(pops, K_core)
+        sizes = _proportional_alloc(pops, K)
 
         val1_comms = {}
-        start = K_mix
+        start = 0
         for v, size in zip(vals1, sizes):
             val1_comms[v] = list(range(start, start + size))
             start += size
@@ -1468,13 +1437,12 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
         group_comms = {}
         for gid in sorted_groups:
             v1 = G.group_to_attrs.get(gid, {}).get(char1)
-            group_comms[gid] = mix_comms + val1_comms.get(v1, [])
+            group_comms[gid] = val1_comms.get(v1, [])
 
     else:
         char1, _ = meaningful[0]
         char2, _ = meaningful[1]
 
-        # Collect population per (v1, v2) pair
         pair_pop = {}
         for gid in sorted_groups:
             v1 = G.group_to_attrs.get(gid, {}).get(char1)
@@ -1483,10 +1451,10 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
 
         pairs = sorted(pair_pop.keys(), key=lambda p: (str(p[0]), str(p[1])))
         pops = [pair_pop[p] for p in pairs]
-        sizes = _proportional_alloc(pops, K_core)
+        sizes = _proportional_alloc(pops, K)
 
         block_comms = {}
-        start = K_mix
+        start = 0
         for pair, size in zip(pairs, sizes):
             block_comms[pair] = list(range(start, start + size))
             start += size
@@ -1495,10 +1463,8 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
         for gid in sorted_groups:
             v1 = G.group_to_attrs.get(gid, {}).get(char1)
             v2 = G.group_to_attrs.get(gid, {}).get(char2)
-            group_comms[gid] = mix_comms + block_comms.get((v1, v2), [])
+            group_comms[gid] = block_comms.get((v1, v2), [])
 
-    # Assign nodes capacity-aware: allocate proportional to remaining headroom
-    # so all K communities converge to N/K nodes regardless of mixing floor overlap.
     G.number_of_communities = K
     target = max(1, N // K)
     community_count = np.zeros(K, dtype=np.int64)
@@ -1508,7 +1474,7 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
         if len(nodes) == 0:
             continue
         rng.shuffle(nodes)
-        chosen = group_comms.get(gid, mix_comms) or mix_comms
+        chosen = group_comms.get(gid, list(range(K))) or list(range(K))
 
         # Weight each community by remaining capacity (headroom above current fill)
         headroom = np.array([max(0, target - community_count[c]) for c in chosen], dtype=np.float64)
@@ -1525,6 +1491,16 @@ def populate_communities_segregation(G, num_communities, mixing_floor=0.1, isola
                 G.nodes_to_communities[node_int] = comm
                 G.communities_to_groups.setdefault(comm, []).append(gid)
             idx += count
+
+    # Spread communities evenly across [0,1) with a deterministic permutation so
+    # same-block communities don't cluster and Phase B ring search is unbiased.
+    coord_pos = rng.permutation(K)
+    jitter_std = 1e-4
+    node_coordinates = {}
+    for node_int, comm in G.nodes_to_communities.items():
+        theta_c = float(coord_pos[comm]) / K
+        node_coordinates[int(node_int)] = (theta_c + float(rng.normal(0, jitter_std))) % 1.0
+    G.node_coordinates = node_coordinates
 
     print(f"\nSegregation-based assignment complete: {N} nodes -> {K} communities")
 
