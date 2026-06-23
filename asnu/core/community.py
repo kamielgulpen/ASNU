@@ -11,9 +11,7 @@ populate_communities_capacity : Assign nodes to communities (capacity_fast mode)
 populate_communities_segregation : Assign nodes to communities (segregation mode)
 load_communities : Load community assignments from JSON file
 """
-import csv
 import random
-from collections import Counter
 from itertools import product
 from tqdm import tqdm
 
@@ -23,8 +21,8 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
                        output_path='communities.json',
                        community_size_distribution='natural',
                        pop_column='n', src_suffix='_src', dst_suffix='_dst',
-                       link_column='n', min_group_size=0, verbose=True,
-                       new_comm_penalty=3.0, mixing_floor=0.1,
+                       link_column='n', verbose=True,
+                       new_comm_penalty=3.0,
                        isolation_threshold=0.05, refine_swaps=300_000, mode='capacity_fast'):
     import json
     from asnu.core.graph import NetworkXGraph
@@ -38,7 +36,6 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
 
     if mode == 'segregation':
         populate_communities_segregation(G, number_of_communities, refine_swaps,
-                                         mixing_floor=mixing_floor,
                                          isolation_threshold=isolation_threshold)
     else:  # capacity_fast
         populate_communities_capacity(G, number_of_communities,
@@ -48,7 +45,6 @@ def create_communities(pops_path, links_path, scale, number_of_communities=None,
                                       fast=True)
 
     # ── Serialize to JSON ─────────────────────────────────────────────────
-    n_groups = len(G.group_ids)
     _pm = G.probability_matrix
     _n = _pm.shape[0] if hasattr(_pm, 'shape') else 0
 
@@ -231,9 +227,8 @@ def find_separated_groups(G, num_communities):
 
 def populate_communities_capacity(G, num_communities, community_size_distribution='natural',
                                    new_comm_penalty=3.0, allow_new_communities=True, fast=False,
-                                   sa_fraction=1.0, overcap_penalty=float('inf'), max_eval=100,
                                    refine_swaps=300_000, refine_overshoot_penalty=10.0,
-                                   refine_temperature=1.0, refine_seed=42):
+                                   refine_seed=42):
     """
     Assign nodes to communities by matching absolute edge counts against
     maximum_num_links budget. Uses capacity_fast (Rust) backend.
@@ -411,7 +406,6 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
 
             _rng = np.random.default_rng(42)
             comm_coords = _rng.uniform(0.0, 1.0, size=G.number_of_communities)
-            jitter_std = 1e-4
             node_coordinates = {}
             for node_int, comm in G.nodes_to_communities.items():
                 theta_c = float(comm_coords[int(comm)])
@@ -423,7 +417,7 @@ def populate_communities_capacity(G, num_communities, community_size_distributio
             print("  refine_communities_move not available; skipping refinement.")
 
 
-def populate_communities_segregation(G, num_communities, refine_swaps, mixing_floor=0.1,
+def populate_communities_segregation(G, num_communities, refine_swaps,
                                       isolation_threshold=0.05, seed=42):
     """
     Segregation-driven hierarchical community assignment.
@@ -619,7 +613,6 @@ def populate_communities_segregation(G, num_communities, refine_swaps, mixing_fl
     K_new = int(new_assignments.max()) + 1
     G.number_of_communities = K_new
     coord_pos = rng.permutation(K_new)
-    jitter_std = 1e-4
     node_coordinates = {}
     for i in range(len(refine_nodes)):
         node_int = int(refine_nodes[i])

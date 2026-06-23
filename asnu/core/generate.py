@@ -25,7 +25,7 @@ import os
 import shutil
 from collections import defaultdict
 
-from asnu.core.utils import (find_nodes, read_file, desc_groups, stratified_allocate)
+from asnu.core.utils import (read_file, desc_groups, stratified_allocate)
 from asnu.core.grn import establish_links
 from asnu.core.graph import NetworkXGraph
 from asnu.core.community import (
@@ -60,16 +60,14 @@ def _compute_maximum_num_links(G, links_path, scale, src_suffix='_src',
 
     Returns
     -------
-    pandas.DataFrame
-        The raw link data DataFrame for downstream use
+    tuple (numpy.ndarray, numpy.ndarray)
+        Source and destination group ID arrays, one entry per unique (src, dst) pair.
     """
     import pandas as _pd
     import numpy as _np
 
     df_n_group_links = read_file(links_path)
-    df_n_group_links = df_n_group_links.sort_values('n', ascending= True)
-
-    print(df_n_group_links.n.sum())
+    df_n_group_links = df_n_group_links.sort_values('n', ascending=True)
 
     if verbose:
         print("Calculating link requirements...")
@@ -99,7 +97,6 @@ def _compute_maximum_num_links(G, links_path, scale, src_suffix='_src',
     # The CSV can have multiple rows for the same group pair (e.g. different income
     # sub-groups that map to the same group ID after enrichment); dropping duplicates
     # would lose those counts.
-    import numpy as _np
     mask_np = src_id_series.notna().values & dst_id_series.notna().values
     _src_raw = src_id_series.values[mask_np].astype(_np.int64)
     _dst_raw = dst_id_series.values[mask_np].astype(_np.int64)
@@ -127,11 +124,11 @@ def _compute_maximum_num_links(G, links_path, scale, src_suffix='_src',
         total_links = int(sum(G.maximum_num_links.values()))
         print(f"Total requested links: {total_links} (target: {target_total})")
 
-    # Return df + aggregated group ID arrays (one entry per unique pair, matching
+    # Return aggregated group ID arrays (one entry per unique pair, matching
     # G.maximum_num_links keys exactly) for reuse in edge creation.
-    # Using the aggregated arrays avoids duplicate (s,d) entries that would cause
+    # Using aggregated arrays avoids duplicate (s,d) entries that would cause
     # the Rust backend to process the same pair multiple times.
-    return df_n_group_links, src_arr.astype(float), dst_arr.astype(float)
+    return src_arr.astype(float), dst_arr.astype(float)
 
 
 def init_nodes(G, pops_path, scale=1, pop_column='n'):
@@ -151,7 +148,6 @@ def init_nodes(G, pops_path, scale=1, pop_column='n'):
     pop_column : str, optional
         Name of the column containing population counts (default 'n')
     """
-    print(G.group_to_attrs.keys())
     group_desc_dict, characteristic_cols = desc_groups(pops_path, pop_column=pop_column)
 
     # Build (key, original_value) pairs for stratified allocation
@@ -216,25 +212,20 @@ def _setup_no_community_structure(G):
         G.nodes_to_communities[node] = 0
 
 
-def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
-                       verbose, src_suffix, dst_suffix, pa_scope,
-                       bridge_probability=0, pre_seed_edges=None,
-                       _links_df=None, _src_gids=None, _dst_gids=None,
-                        use_ring=False, ring_theta_radius=0.02, ring_k_min=8,
-                       ring_pa_strength=0.0, ring_trans_window_factor=1.0,
-                       ring_trans_max_scan=32, ring_seed=None, ring_burst=8 ):
+def _run_edge_creation_python(G, links_path, fraction, reciprocity_p, transitivity_p,
+                              verbose, src_suffix, dst_suffix, pa_scope,
+                              bridge_probability=0, pre_seed_edges=None,
+                              _src_gids=None, _dst_gids=None):
     """Pure-Python fallback for edge creation."""
     import pandas as _pd
 
     warnings = []
 
-    if _links_df is not None and _src_gids is not None and _dst_gids is not None:
-        # Aggregated arrays from _compute_maximum_num_links — no NaN, no dups
+    if _src_gids is not None and _dst_gids is not None:
         src_gid_list = _src_gids.astype(int).tolist()
         dst_gid_list = _dst_gids.astype(int).tolist()
     else:
         df_n_group_links = read_file(links_path)
-        # df_n_group_links = df_n_group_links.sort_values('n', ascending= True)
         src_cols = [c for c in df_n_group_links.columns if c.endswith(src_suffix)]
         dst_cols = [c for c in df_n_group_links.columns if c.endswith(dst_suffix)]
         src_attr_names = [c[:-len(src_suffix)] for c in src_cols]
@@ -247,7 +238,6 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
 
     group_pair_to_communities = build_group_pair_to_communities_lookup(G, verbose=verbose)
 
-    # Pre-compute (src_nodes, src_id, dst_nodes, dst_id) for every row
     row_lookups = [
         (
             (G.group_to_nodes[sg], sg) if sg is not None and not _pd.isna(sg) else None,
@@ -256,7 +246,7 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
         for sg, dg in zip(src_gid_list, dst_gid_list)
     ]
 
-    total_rows = len(df_n_group_links)
+    total_rows = len(row_lookups)
     for idx, (src_lookup, dst_lookup) in enumerate(row_lookups):
         if verbose and ((idx + 1) % 500 == 0 or idx == 0 or idx == total_rows - 1):
             print(f"\rProcessing row {idx + 1} of {total_rows}", end="")
@@ -293,25 +283,11 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
                 print(f"  ... and {len(warnings) - 10} more")
 
 
-"""
-Drop-in replacements for `_run_edge_creation` and `generate` in
-asnu/core/generate.py. Replace the two existing functions wholesale.
-
-Only additions vs. your current versions:
-  * 5 new params (internal_transitivity / external_transitivity /
-    internal_pa / external_pa / pa_max_scan), defaulting to behaviour-preserving
-    values, threaded down to the Rust call.
-Everything else is unchanged.
-"""
-
-
 def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
                        verbose, src_suffix, dst_suffix, pa_scope,
                        bridge_probability=0, pre_seed_edges=None,
-                       _links_df=None, _src_gids=None, _dst_gids=None,
-                       internal_transitivity_p=-1.0, external_transitivity_p=-1.0,
-                       internal_pa_strength=0.0, external_pa_strength=0.0,
-                       pa_max_scan=64):
+                       _src_gids=None, _dst_gids=None,
+                       internal_transitivity_p=-1.0, external_transitivity_p=-1.0):
     """
     Run the edge creation loop using the community structure already set on G.
     Tries Rust backend, falls back to Python.
@@ -327,7 +303,7 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
                                   transitivity_p, verbose, src_suffix, dst_suffix, pa_scope,
                                   bridge_probability=bridge_probability,
                                   pre_seed_edges=pre_seed_edges,
-                                  _links_df=_links_df, _src_gids=_src_gids, _dst_gids=_dst_gids)
+                                  _src_gids=_src_gids, _dst_gids=_dst_gids)
         return
 
     if verbose:
@@ -336,7 +312,7 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
     import pandas as _pd
     import numpy as _np
 
-    if _links_df is not None and _src_gids is not None and _dst_gids is not None:
+    if _src_gids is not None and _dst_gids is not None:
         sg_arr = _src_gids.astype(_np.int64)
         dg_arr = _dst_gids.astype(_np.int64)
     else:
@@ -387,9 +363,6 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
         node_coords,
         float(internal_transitivity_p),
         float(external_transitivity_p),
-        # float(internal_pa_strength),
-        # float(external_pa_strength),
-        # int(pa_max_scan),
     )
 
     G.graph.add_edges_from(new_edges)
@@ -406,22 +379,13 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
              fill_unfulfilled=True, fully_connect_communities=False,
              pa_scope='local', community_file=None, bridge_probability=0,
              pre_seed_edges=None,
-             internal_transitivity=-1.0, external_transitivity=-1.0,
-             internal_pa=0.0, external_pa=0.0, pa_max_scan=64):
+             internal_transitivity=-1.0, external_transitivity=-1.0):
     """
     Generate a population-based network using NetworkX.
 
-    New params (Phase B internal/external control; defaults = previous behaviour):
-        internal_transitivity, external_transitivity : float
-            Triangle-closing probability for same-group (internal) vs
-            different-group (external) edges. -1.0 → inherit `transitivity`.
-        internal_pa, external_pa : float
-            Preferential-attachment strength (how fast a node's global
-            attractiveness grows per received edge) for internal vs external
-            edges. 0.0 → PA off (uniform destination picks, as before).
-        pa_max_scan : int
-            Cap on nodes scanned when weighting a PA destination pick and on
-            neighbours scanned per transitivity step (perf guard).
+    internal_transitivity, external_transitivity : float
+        Triangle-closing probability for same-group (internal) vs
+        different-group (external) edges. -1.0 → inherit `transitivity`.
     """
     if verbose:
         print("=" * 60)
@@ -440,19 +404,15 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
         print(f"  Created {G.graph.number_of_nodes()} nodes")
         print("\nStep 2: Creating edges from interaction patterns...")
 
-    _links_df, _src_gids, _dst_gids = _compute_maximum_num_links(
+    _src_gids, _dst_gids = _compute_maximum_num_links(
         G, links_path, scale, src_suffix=src_suffix,
         dst_suffix=dst_suffix, link_column=link_column, verbose=verbose)
 
     preferential_attachment_fraction = 1 - preferential_attachment
 
-    # Bundle the new per-side knobs once.
     _edge_kwargs = dict(
         internal_transitivity_p=internal_transitivity,
         external_transitivity_p=external_transitivity,
-    #     internal_pa_strength=internal_pa,
-    #     external_pa_strength=external_pa,
-    #     pa_max_scan=pa_max_scan,
     )
 
     if community_file is not None:
@@ -483,7 +443,7 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
                                src_suffix, dst_suffix, pa_scope,
                                bridge_probability=bridge_probability,
                                pre_seed_edges=pre_seed_edges,
-                               _links_df=_links_df, _src_gids=_src_gids, _dst_gids=_dst_gids,
+                               _src_gids=_src_gids, _dst_gids=_dst_gids,
                                **_edge_kwargs)
 
             if fill_unfulfilled:
@@ -502,7 +462,7 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
                            reciprocity, transitivity, verbose,
                            src_suffix, dst_suffix, pa_scope,
                            bridge_probability=bridge_probability,
-                           _links_df=_links_df, _src_gids=_src_gids, _dst_gids=_dst_gids,
+                           _src_gids=_src_gids, _dst_gids=_dst_gids,
                            **_edge_kwargs)
 
         if fill_unfulfilled:

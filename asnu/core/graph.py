@@ -25,7 +25,6 @@ Examples
 
 import networkx as nx
 import numpy as np
-import json
 import os
 
 
@@ -82,7 +81,7 @@ class NetworkXGraph:
         self.communities_to_groups = {}
         self.existing_num_links = {}
         self.maximum_num_links = {}
-        self.probability_matrix = np.zeros((2,3))
+        self.probability_matrix = np.zeros((0, 0))
         self.number_of_communities = 0
 
         # Group pairs that community structure cannot serve (handled by fill_unfulfilled)
@@ -91,23 +90,6 @@ class NetworkXGraph:
         # Global popularity pool for preferential attachment with memory
         # Keyed by (community_id, group_id) -> list of nodes (with duplicates for weighting)
         self.popularity_pool = {}
-
-        # self._load_metadata()
-
-    def _save_metadata(self):
-        """Save generation metadata to JSON."""
-        metadata = {
-            'num_nodes': self.graph.number_of_nodes(),
-            'num_edges': self.graph.number_of_edges(),
-            'attrs_to_group': {str(k): v for k, v in self.attrs_to_group.items()},
-            'group_to_attrs': self.group_to_attrs,
-            'group_to_nodes': self.group_to_nodes,
-            'nodes_to_group': {str(k): v for k, v in self.nodes_to_group.items()},
-            'existing_num_links': {str(k): v for k, v in self.existing_num_links.items()},
-            'maximum_num_links': {str(k): v for k, v in self.maximum_num_links.items()}
-        }
-        with open(self.metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2)
 
     def _load_graph_npz(self, path=None):
         """Load graph from compressed .npz file"""
@@ -128,36 +110,7 @@ class NetworkXGraph:
         # Restore node attributes
         node_attrs = data['node_attrs'].item()  # .item() unpacks the object array
         nx.set_node_attributes(G, node_attrs)
-        
-        # # Restore metadata if present
-        # if 'metadata' in data:
-        #     metadata = pickle.loads(data['metadata'].tobytes())
-        #     G.graph.update(metadata)
-        
         return G
-
-    def to_networkx(self):
-        """
-        Get the underlying NetworkX DiGraph.
-
-        Returns the actual nx.DiGraph object, which you can modify directly.
-        Any changes will be reflected in the wrapper.
-
-        Returns
-        -------
-        nx.DiGraph
-            The underlying NetworkX directed graph
-
-        Examples
-        --------
-        >>> G = NetworkXGraph("my_graph")
-        >>> nx_graph = G.to_networkx()
-        >>> # Modify the graph directly
-        >>> nx_graph.add_node(999, custom_attr="value")
-        >>> # Changes are reflected in G.graph
-        >>> assert G.graph.has_node(999)
-        """
-        return self.graph
 
     def get_non_isolates_batch(self, node_list, max_count=None):
         """
