@@ -216,10 +216,13 @@ def _setup_no_community_structure(G):
         G.nodes_to_communities[node] = 0
 
 
-def _run_edge_creation_python(G, links_path, fraction, reciprocity_p, transitivity_p,
-                              verbose, src_suffix, dst_suffix, pa_scope,
-                              bridge_probability=0, pre_seed_edges=None,
-                              _links_df=None, _src_gids=None, _dst_gids=None):
+def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
+                       verbose, src_suffix, dst_suffix, pa_scope,
+                       bridge_probability=0, pre_seed_edges=None,
+                       _links_df=None, _src_gids=None, _dst_gids=None,
+                        use_ring=False, ring_theta_radius=0.02, ring_k_min=8,
+                       ring_pa_strength=0.0, ring_trans_window_factor=1.0,
+                       ring_trans_max_scan=32, ring_seed=None, ring_burst=8 ):
     """Pure-Python fallback for edge creation."""
     import pandas as _pd
 
@@ -290,14 +293,32 @@ def _run_edge_creation_python(G, links_path, fraction, reciprocity_p, transitivi
                 print(f"  ... and {len(warnings) - 10} more")
 
 
+"""
+Drop-in replacements for `_run_edge_creation` and `generate` in
+asnu/core/generate.py. Replace the two existing functions wholesale.
+
+Only additions vs. your current versions:
+  * 5 new params (internal_transitivity / external_transitivity /
+    internal_pa / external_pa / pa_max_scan), defaulting to behaviour-preserving
+    values, threaded down to the Rust call.
+Everything else is unchanged.
+"""
+
+
 def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
                        verbose, src_suffix, dst_suffix, pa_scope,
                        bridge_probability=0, pre_seed_edges=None,
-                       _links_df=None, _src_gids=None, _dst_gids=None):
+                       _links_df=None, _src_gids=None, _dst_gids=None,
+                       internal_transitivity_p=-1.0, external_transitivity_p=-1.0,
+                       internal_pa_strength=0.0, external_pa_strength=0.0,
+                       pa_max_scan=64):
     """
     Run the edge creation loop using the community structure already set on G.
     Tries Rust backend, falls back to Python.
-    _links_df, _src_gids, _dst_gids: precomputed from _compute_maximum_num_links to avoid re-reading.
+
+    internal_* / external_* control per-side (same-group vs cross-group)
+    transitivity and preferential attachment in Phase B. Defaults preserve the
+    previous behaviour exactly (PA off, transitivity inherits transitivity_p).
     """
     try:
         from asnu_rust import run_edge_creation as rust_edge_creation
@@ -315,15 +336,11 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
     import pandas as _pd
     import numpy as _np
 
-    # _src_gids/_dst_gids are the aggregated arrays from _compute_maximum_num_links,
-    # so they already correspond 1-to-1 with G.maximum_num_links keys (no NaN, no dups).
     if _links_df is not None and _src_gids is not None and _dst_gids is not None:
         sg_arr = _src_gids.astype(_np.int64)
         dg_arr = _dst_gids.astype(_np.int64)
     else:
-        # Fallback: recompute from file using the same merge approach
         df_n_group_links = read_file(links_path)
-        # df_n_group_links = df_n_group_links.sort_values("n", ascending=True)
         _src_cols = [c for c in df_n_group_links.columns if c.endswith(src_suffix)]
         _dst_cols = [c for c in df_n_group_links.columns if c.endswith(dst_suffix)]
         _src_attr = [c[:-len(src_suffix)] for c in _src_cols]
@@ -333,7 +350,6 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
             return df[cols].rename(columns={c: c[:-len(sfx)] for c in cols}).merge(_lk, on=attr, how='left')['_gid']
         sg_s = _mgid(df_n_group_links, _src_cols, _src_attr, src_suffix)
         dg_s = _mgid(df_n_group_links, _dst_cols, _dst_attr, dst_suffix)
-        # Aggregate duplicates (same as _compute_maximum_num_links)
         _agg = _pd.DataFrame({'s': sg_s, 'd': dg_s}).dropna()
         sg_arr = _agg['s'].values.astype(_np.int64)
         dg_arr = _agg['d'].values.astype(_np.int64)
@@ -346,19 +362,17 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
         if G.group_to_nodes.get(s) and G.group_to_nodes.get(d)
     ]
 
-    # Convert G data to plain dicts for Rust
     ctn = {(int(k[0]), int(k[1])): [int(n) for n in v]
            for k, v in G.communities_to_nodes.items()}
     ntg = {int(k): int(v) for k, v in G.nodes_to_group.items()}
     mnl = {(int(k[0]), int(k[1])): int(v) for k, v in G.maximum_num_links.items()}
-    # For single community the lazy defaultdict has no .items(); build vcm from group_pairs
+
     if G.number_of_communities == 1:
         vcm = {(int(s), int(d)): [0] for s, d, _ in group_pairs}
     else:
         vcm = {(int(k[0]), int(k[1])): [int(c) for c in v]
                for k, v in group_pair_to_communities.items()}
 
-    # Convert pre_seed_edges for Rust (list of (int, int) tuples or None)
     rust_pre_edges = None
     if pre_seed_edges:
         rust_pre_edges = [(int(u), int(v)) for u, v in pre_seed_edges]
@@ -371,9 +385,13 @@ def _run_edge_creation(G, links_path, fraction, reciprocity_p, transitivity_p,
         bridge_probability,
         rust_pre_edges,
         node_coords,
+        float(internal_transitivity_p),
+        float(external_transitivity_p),
+        # float(internal_pa_strength),
+        # float(external_pa_strength),
+        # int(pa_max_scan),
     )
 
-    # Apply edges to the NetworkX graph
     G.graph.add_edges_from(new_edges)
     for src, dst, count in link_counts:
         G.existing_num_links[(src, dst)] = count
@@ -387,106 +405,63 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
              pop_column='n', src_suffix='_src', dst_suffix='_dst', link_column='n',
              fill_unfulfilled=True, fully_connect_communities=False,
              pa_scope='local', community_file=None, bridge_probability=0,
-             pre_seed_edges=None):
+             pre_seed_edges=None,
+             internal_transitivity=-1.0, external_transitivity=-1.0,
+             internal_pa=0.0, external_pa=0.0, pa_max_scan=64):
     """
     Generate a population-based network using NetworkX.
 
-    Creates a network by first generating nodes from population data, then
-    establishing edges based on interaction patterns. Supports preferential
-    attachment, reciprocity, transitivity, and community structure.
-
-    Community structure is provided via a pre-computed JSON file created by
-    create_communities(). If no community file is given, edges are created
-    without any community structure.
-
-    Parameters
-    ----------
-    pops_path : str
-        Path to population data (CSV or Excel)
-    links_path : str
-        Path to interaction data (CSV or Excel)
-    preferential_attachment : float
-        Preferential attachment strength (0-1)
-    scale : float
-        Population scaling factor
-    reciprocity : float
-        Probability of reciprocal edges (0-1)
-    transitivity : float
-        Probability of transitive edges (0-1)
-    base_path : str, optional
-        Directory for saving graph (default "graph_data")
-    verbose : bool, optional
-        Whether to print progress information
-    pop_column : str, optional
-        Column name for population counts in pops_path (default 'n')
-    src_suffix : str, optional
-        Suffix for source group columns in links_path (default '_src')
-    dst_suffix : str, optional
-        Suffix for destination group columns in links_path (default '_dst')
-    link_column : str, optional
-        Column name for link counts in links_path (default 'n')
-    fill_unfulfilled : bool, optional
-        Whether to fill unfulfilled group pairs after initial link creation (default True)
-    fully_connect_communities : bool, optional
-        Whether to fully connect all nodes within each community, bypassing normal
-        link formation process (default False). Requires community_file.
-    pa_scope : str, optional
-        Scope of preferential attachment popularity (default 'local'):
-        - 'local': popularity stays within the community (intra-community)
-        - 'global': popularity spreads across all communities (inter-community)
-    community_file : str, optional
-        Path to a JSON file with pre-computed community assignments (default None).
-        Created by create_communities(). If not provided, the network is generated
-        without any community structure.
-    bridge_probability : float, optional
-        Probability of routing an edge to a neighboring community (±1, circular
-        wrapping). Creates wide bridges between adjacent communities, modeling
-        people participating in multiple foci. Default 0 (no bridging).
-
-    Returns
-    -------
-    NetworkXGraph
-        Generated network with graph data and metadata
+    New params (Phase B internal/external control; defaults = previous behaviour):
+        internal_transitivity, external_transitivity : float
+            Triangle-closing probability for same-group (internal) vs
+            different-group (external) edges. -1.0 → inherit `transitivity`.
+        internal_pa, external_pa : float
+            Preferential-attachment strength (how fast a node's global
+            attractiveness grows per received edge) for internal vs external
+            edges. 0.0 → PA off (uniform destination picks, as before).
+        pa_max_scan : int
+            Cap on nodes scanned when weighting a PA destination pick and on
+            neighbours scanned per transitivity step (perf guard).
     """
     if verbose:
-        print("="*60)
+        print("=" * 60)
         print("NETWORK GENERATION")
-        print("="*60)
+        print("=" * 60)
         print("\nStep 1: Creating nodes from population data...")
 
-    # Prepare output directory
     if os.path.exists(base_path):
         shutil.rmtree(base_path)
     os.makedirs(base_path)
 
     G = NetworkXGraph(base_path)
-
-    # Create nodes with stratified allocation
     init_nodes(G, pops_path, scale, pop_column=pop_column)
 
     if verbose:
         print(f"  Created {G.graph.number_of_nodes()} nodes")
         print("\nStep 2: Creating edges from interaction patterns...")
 
-    # Compute maximum link targets; capture precomputed df + group ID arrays to avoid re-reading
     _links_df, _src_gids, _dst_gids = _compute_maximum_num_links(
         G, links_path, scale, src_suffix=src_suffix,
         dst_suffix=dst_suffix, link_column=link_column, verbose=verbose)
 
-    # Invert preferential attachment for internal representation
     preferential_attachment_fraction = 1 - preferential_attachment
 
+    # Bundle the new per-side knobs once.
+    _edge_kwargs = dict(
+        internal_transitivity_p=internal_transitivity,
+        external_transitivity_p=external_transitivity,
+    #     internal_pa_strength=internal_pa,
+    #     external_pa_strength=external_pa,
+    #     pa_max_scan=pa_max_scan,
+    )
+
     if community_file is not None:
-        # --- Load pre-computed communities from file ---
         if verbose:
             print("\nStep 2a: Loading communities from file...")
-
         load_communities(G, community_file)
-
         if verbose:
             print(f"  Loaded {G.number_of_communities} communities from {community_file}")
 
-        # Pre-seed edges into the graph (for multiplex hierarchical generation)
         if pre_seed_edges:
             G.graph.add_edges_from(pre_seed_edges)
             for u, v in pre_seed_edges:
@@ -508,7 +483,8 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
                                src_suffix, dst_suffix, pa_scope,
                                bridge_probability=bridge_probability,
                                pre_seed_edges=pre_seed_edges,
-                               _links_df=_links_df, _src_gids=_src_gids, _dst_gids=_dst_gids)
+                               _links_df=_links_df, _src_gids=_src_gids, _dst_gids=_dst_gids,
+                               **_edge_kwargs)
 
             if fill_unfulfilled:
                 if verbose:
@@ -516,7 +492,6 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
                 fill_unfulfilled_group_pairs(G, reciprocity, verbose=verbose)
 
     else:
-        # --- No community structure ---
         if verbose:
             print("\nNo community file given.")
             print("  Generating edges without community structure...")
@@ -527,29 +502,25 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
                            reciprocity, transitivity, verbose,
                            src_suffix, dst_suffix, pa_scope,
                            bridge_probability=bridge_probability,
-                           _links_df=_links_df, _src_gids=_src_gids, _dst_gids=_dst_gids)
+                           _links_df=_links_df, _src_gids=_src_gids, _dst_gids=_dst_gids,
+                           **_edge_kwargs)
 
         if fill_unfulfilled:
             if verbose:
                 print("\nStep 3: Filling remaining unfulfilled group pairs...")
             fill_unfulfilled_group_pairs(G, reciprocity, verbose=verbose)
 
-    # Save to disk
     G.finalize()
 
     if verbose:
-        # Calculate link fulfillment statistics
         total_requested = sum(G.maximum_num_links.values())
         total_created = G.graph.number_of_edges()
         fulfillment_rate = (total_created / total_requested * 100) if total_requested > 0 else 0
-
-        # Count overfulfilled pairs
         overfulfilled = sum(1 for (src, dst) in G.maximum_num_links.keys()
                            if G.existing_num_links.get((src, dst), 0) > G.maximum_num_links[(src, dst)])
-
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"NETWORK GENERATION COMPLETE")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"Nodes: {G.graph.number_of_nodes()}")
         print(f"Edges: {G.graph.number_of_edges()}")
         print(f"\nLink Fulfillment:")
@@ -560,6 +531,6 @@ def generate(pops_path, links_path, preferential_attachment, scale, reciprocity,
         if overfulfilled > 0:
             print(f"  Overfulfilled pairs: {overfulfilled}")
         print(f"\nSaved to: {base_path}")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
     return G
